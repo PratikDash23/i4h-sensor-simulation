@@ -212,6 +212,25 @@ def set_sim_params():
         return {"status": "error", "message": str(e)}, 400
 
 
+@app.route("/get_frequency", methods=["GET"])
+def get_frequency():
+    """Get the current probe frequency in MHz"""
+    return {"frequency": probes[active_probe].get_frequency()}
+
+
+@app.route("/set_frequency", methods=["POST"])
+def set_frequency():
+    """Set the probe frequency in MHz"""
+    try:
+        freq = float(request.json["frequency"])
+        if freq <= 0:
+            return {"status": "error", "message": "Frequency must be positive"}, 400
+        probes[active_probe].set_frequency(freq)
+        return {"status": "success", "frequency": probes[active_probe].get_frequency()}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}, 400
+
+
 @app.route("/simulate", methods=["POST"])
 def simulate():
     pose_delta = request.json["pose_delta"]

@@ -184,6 +184,16 @@
                 </div>
 
                 <div class="control-group">
+                    <strong>Probe Frequency:</strong>
+                    <div style="margin-top: 12px;">
+                        <div style="display: flex; align-items: center; gap: 8px;">
+                            <input type="range" id="frequencySlider" min="1.0" max="15.0" step="0.5" value="5.0" style="flex: 1;">
+                            <span id="frequencyValue" style="min-width: 60px; font-weight: 600;">5.0 MHz</span>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="control-group">
                     <strong>Simulation Parameters:</strong>
                     <div style="margin-top: 12px;">
                         <label style="display: flex; align-items: center; gap: 8px; margin: 8px 0;">
@@ -398,6 +408,9 @@
                     pose = poseData.pose;
                     updateDisplay();
 
+                    // Refresh frequency for the new probe type
+                    await fetchFrequency();
+
                     // Get a fresh simulation image
                     await updateSimulation([0, 0, 0, 0, 0, 0]);
                 }
@@ -447,6 +460,19 @@
                 await updateSimulation([0, 0, 0, 0, 0, 0]);
             } catch (error) {
                 console.error('Error updating simulation parameters:', error);
+            }
+        }
+
+        async function fetchFrequency() {
+            try {
+                const response = await fetch('/get_frequency');
+                if (response.ok) {
+                    const data = await response.json();
+                    document.getElementById('frequencySlider').value = data.frequency;
+                    document.getElementById('frequencyValue').textContent = data.frequency.toFixed(1) + ' MHz';
+                }
+            } catch (error) {
+                console.error('Error fetching frequency:', error);
             }
         }
 
@@ -595,6 +621,29 @@
 
             // Fetch current simulation parameters
             await fetchSimParams();
+
+            // Fetch current frequency
+            await fetchFrequency();
+
+            // Frequency slider handler
+            document.getElementById('frequencySlider').addEventListener('input', (e) => {
+                document.getElementById('frequencyValue').textContent = parseFloat(e.target.value).toFixed(1) + ' MHz';
+            });
+            document.getElementById('frequencySlider').addEventListener('change', async (e) => {
+                const freq = parseFloat(e.target.value);
+                try {
+                    const response = await fetch('/set_frequency', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ frequency: freq }),
+                    });
+                    if (response.ok) {
+                        await updateSimulation([0, 0, 0, 0, 0, 0]);
+                    }
+                } catch (error) {
+                    console.error('Error setting frequency:', error);
+                }
+            });
 
             // Fetch initial pose from server
             try {
