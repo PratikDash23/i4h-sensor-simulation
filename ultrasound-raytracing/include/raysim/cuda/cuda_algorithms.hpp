@@ -181,6 +181,33 @@ class CUDAAlgorithms {
                                                   float sector_angle, float far, uint2 output_size,
                                                   cudaStream_t stream);
 
+  /**
+   * Curvilinear scan conversion for uint32 categorical buffers (organ/material ids).
+   * Uses nearest-neighbour sampling — bilinear interpolation is meaningless for ids.
+   * Output pixels outside the fan are set to UINT32_MAX (background sentinel).
+   */
+  std::unique_ptr<CudaMemory> scan_convert_curvilinear_uint32(CudaMemory* scan_lines,
+                                                              uint2 size, float sector_angle,
+                                                              float radius, float far,
+                                                              uint2 output_size,
+                                                              cudaStream_t stream);
+
+  /**
+   * Linear-array scan conversion for uint32 categorical buffers. Nearest-neighbour.
+   * Output pixels outside the valid region are set to UINT32_MAX.
+   */
+  std::unique_ptr<CudaMemory> scan_convert_linear_uint32(CudaMemory* scan_lines, uint2 size,
+                                                         float width, float far,
+                                                         uint2 output_size, cudaStream_t stream);
+
+  /**
+   * Phased-array scan conversion for uint32 categorical buffers. Nearest-neighbour.
+   * Output pixels outside the wedge are set to UINT32_MAX.
+   */
+  std::unique_ptr<CudaMemory> scan_convert_phased_uint32(CudaMemory* scan_lines, uint2 size,
+                                                         float sector_angle, float far,
+                                                         uint2 output_size, cudaStream_t stream);
+
  private:
   const CudaLauncher normalize_launcher_;
   const CudaLauncher convolve_rows_launcher_;
@@ -193,6 +220,9 @@ class CUDAAlgorithms {
   const CudaLauncher scan_convert_curvilinear_launcher_;
   const CudaLauncher scan_convert_linear_launcher_;
   const CudaLauncher scan_convert_phased_launcher_;
+  const CudaLauncher scan_convert_curvilinear_uint32_launcher_;
+  const CudaLauncher scan_convert_linear_uint32_launcher_;
+  const CudaLauncher scan_convert_phased_uint32_launcher_;
 
   static const size_t NUM_SUB_STREAMS =
       2;  //< Some algorithms run parallel operations in sub-streams

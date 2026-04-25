@@ -28,6 +28,8 @@
 namespace raysim {
 struct Params {
   float* scanlines;
+  uint32_t* organ_ids;     // Parallel buffer to `scanlines` (uint32 per depth-bin), sentinel UINT32_MAX
+  uint32_t* material_ids;  // Parallel buffer to `scanlines` (uint32 per depth-bin), sentinel UINT32_MAX
   uint32_t buffer_size;
   float t_far;
   float min_intensity;

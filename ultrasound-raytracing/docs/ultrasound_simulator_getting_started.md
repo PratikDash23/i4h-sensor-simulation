@@ -60,7 +60,14 @@ simulator = rs.RaytracingUltrasoundSimulator(world, materials)
 sim_params = rs.SimParams()
 sim_params.conv_psf = True
 sim_params.b_mode_size = (1500, 1500)
-image = simulator.simulate(probe, sim_params)
+# `simulate()` returns three (H, W) arrays:
+#   image          — float32 dB-clipped log-compressed B-mode image
+#   organ_ids      — uint32 per-pixel organ index (= world.add() order),
+#                    UINT32_MAX = background
+#   material_ids   — uint32 per-pixel material index from the Materials catalog,
+#                    UINT32_MAX = background
+# This guide focuses on B-mode display, so we discard the id maps.
+image, _organ_ids, _material_ids = simulator.simulate(probe, sim_params)
 
 # Step 7: Display the result with proper scaling
 # Normalize the image for display (typical ultrasound dynamic range)
@@ -244,7 +251,7 @@ sim_params.conv_psf = True
 sim_params.b_mode_size = (1500, 1500)
 sim_params.t_far = 120.0
 sim_params.buffer_size = 4096
-image = simulator.simulate(probe, sim_params)
+image, _organ_ids, _material_ids = simulator.simulate(probe, sim_params)
 
 # Normalize the image for display (typical ultrasound dynamic range)
 min_val = -60.0  # dB
@@ -412,7 +419,7 @@ for bg_idx, background_material in enumerate(backgrounds):
     sim_params.b_mode_size = (1500, 1500)
     sim_params.t_far = 120.0
     sim_params.buffer_size = 4096
-    image = simulator.simulate(probe, sim_params)
+    image, _organ_ids, _material_ids = simulator.simulate(probe, sim_params)
 
     # Normalize the image for display
     min_val = -60.0  # dB
@@ -574,7 +581,7 @@ for i, t_far in enumerate(scan_depths):
     sim_params.buffer_size = 4096
 
     # Run simulation
-    image = simulator.simulate(probe, sim_params)
+    image, _organ_ids, _material_ids = simulator.simulate(probe, sim_params)
 
     # Normalize for display
     min_val = -60.0
@@ -625,7 +632,7 @@ sim_params.b_mode_size = (1500, 1500)  # Try (500,500), (1000,1000), or (2000,20
 sim_params.t_far = 180.0
 sim_params.buffer_size = 4096
 
-image = simulator.simulate(probe, sim_params)
+image, _organ_ids, _material_ids = simulator.simulate(probe, sim_params)
 # ... rest of display code same as above ...
 ```
 
@@ -687,7 +694,7 @@ for i, freq in enumerate(frequencies):
     sim_params.buffer_size = 4096
 
     # Run simulation
-    image = simulator.simulate(probe_freq, sim_params)
+    image, _organ_ids, _material_ids = simulator.simulate(probe_freq, sim_params)
 
     # Normalize for display
     min_val = -60.0
@@ -847,7 +854,7 @@ fig, axes = plt.subplots(1, 3, figsize=(18, 6))
 
 for i, (probe, probe_name, description) in enumerate(zip(probes, probe_names, descriptions)):
     # Run simulation
-    image = simulator.simulate(probe, sim_params)
+    image, _organ_ids, _material_ids = simulator.simulate(probe, sim_params)
 
     # Normalize for display
     min_val = -60.0
@@ -927,7 +934,7 @@ for i, width in enumerate(widths):
         num_elements_x=128
     )
 
-    image = simulator.simulate(probe, sim_params)
+    image, _organ_ids, _material_ids = simulator.simulate(probe, sim_params)
     normalized_image = np.clip((image + 60.0) / 60.0, 0, 1)
 
     min_x = simulator.get_min_x() * 2
@@ -1026,7 +1033,7 @@ sim_params.t_far = 200.0  # Deep imaging
 sim_params.buffer_size = 4096
 
 # Run simulation
-image = simulator.simulate(probe, sim_params)
+image, _organ_ids, _material_ids = simulator.simulate(probe, sim_params)
 
 # Display with clinical-style presentation
 min_val = -60.0

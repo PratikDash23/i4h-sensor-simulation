@@ -440,6 +440,122 @@ static __global__ void scan_convert_phased_kernel(cudaTextureObject_t input, uin
   output[index.y * output_size.x + index.x] = tex2D<float>(input, source_x, source_y);
 }
 
+// -----------------------------------------------------------------------------
+// uint32 nearest-neighbour scan-conversion kernels (categorical id maps).
+// Geometry mirrors the float bilinear versions above; bilinear interpolation is
+// invalid on category ids, so we read with floor-rounded integer indices into
+// the source buffer and emit UINT32_MAX outside the valid region.
+// -----------------------------------------------------------------------------
+
+static __device__ __forceinline__ uint32_t fetch_uint32_nn(const uint32_t* __restrict__ input,
+                                                           uint2 input_size, float u, float v) {
+  // u,v in [0,1]; nearest-neighbour, clamp to edge.
+  int ix = static_cast<int>(u * input_size.x);
+  int iy = static_cast<int>(v * input_size.y);
+  if (ix < 0) ix = 0;
+  if (iy < 0) iy = 0;
+  if (ix >= static_cast<int>(input_size.x)) ix = input_size.x - 1;
+  if (iy >= static_cast<int>(input_size.y)) iy = input_size.y - 1;
+  return input[iy * input_size.x + ix];
+}
+
+static __global__ void scan_convert_curvilinear_uint32_kernel(
+    const uint32_t* __restrict__ input, uint2 input_size, uint32_t* __restrict__ output,
+    uint2 output_size, float sector_angle, float near, float far, float scale_x, float offset_z) {
+  const uint2 index =
+      make_uint2(blockIdx.x * blockDim.x + threadIdx.x, blockIdx.y * blockDim.y + threadIdx.y);
+  if ((index.x >= output_size.x) || (index.y >= output_size.y)) { return; }
+
+  float2 coord = make_float2((float(index.x) / float(output_size.x)) * 2.f - 1.f,
+                             float(index.y) / float(output_size.y));
+  coord.x *= scale_x;
+  coord.y = (coord.y * (1.f - offset_z)) + offset_z;
+
+  const float dist = sqrtf(coord.x * coord.x + coord.y * coord.y);
+  if ((dist < near) || (dist > far)) {
+    output[index.y * output_size.x + index.x] = UINT32_MAX;
+    return;
+  }
+  const float angle = atanf(coord.x / coord.y);
+  if (fabsf(angle) > sector_angle / 2.f) {
+    output[index.y * output_size.x + index.x] = UINT32_MAX;
+    return;
+  }
+  const float source_x = (dist - near) / (far - near);
+  const float source_y = angle / sector_angle + 0.5f;
+  output[index.y * output_size.x + index.x] = fetch_uint32_nn(input, input_size, source_x, source_y);
+}
+
+static __global__ void scan_convert_linear_uint32_kernel(const uint32_t* __restrict__ input,
+                                                         uint2 input_size,
+                                                         uint32_t* __restrict__ output,
+                                                         uint2 output_size, float width,
+                                                         float far) {
+  const uint2 index =
+      make_uint2(blockIdx.x * blockDim.x + threadIdx.x, blockIdx.y * blockDim.y + threadIdx.y);
+  if ((index.x >= output_size.x) || (index.y >= output_size.y)) { return; }
+
+  const float physical_aspect = width / far;
+  const float normalized_x = float(index.x) / float(output_size.x - 1);
+  const float normalized_y = float(index.y) / float(output_size.y - 1);
+  const float centered_x = normalized_x - 0.5f;
+
+  const float scale_factor = (physical_aspect < 1.0f) ? physical_aspect : 1.0f;
+  const float scaled_x = centered_x / scale_factor;
+
+  if (fabsf(scaled_x) > 0.5f) {
+    output[index.y * output_size.x + index.x] = UINT32_MAX;
+    return;
+  }
+  const float px = scaled_x * width;
+  const float pz = normalized_y * far;
+  if (fabsf(px) > width / 2.0f || pz < 0.0f || pz > far) {
+    output[index.y * output_size.x + index.x] = UINT32_MAX;
+    return;
+  }
+  const float source_y = (px + width / 2.0f) / width;
+  const float source_x = pz / far;
+  output[index.y * output_size.x + index.x] = fetch_uint32_nn(input, input_size, source_x, source_y);
+}
+
+static __global__ void scan_convert_phased_uint32_kernel(const uint32_t* __restrict__ input,
+                                                         uint2 input_size,
+                                                         uint32_t* __restrict__ output,
+                                                         uint2 output_size, float sector_angle,
+                                                         float far) {
+  const uint2 index =
+      make_uint2(blockIdx.x * blockDim.x + threadIdx.x, blockIdx.y * blockDim.y + threadIdx.y);
+  if ((index.x >= output_size.x) || (index.y >= output_size.y)) { return; }
+
+  output[index.y * output_size.x + index.x] = UINT32_MAX;
+
+  const float sector_angle_rad = (sector_angle / 180.0f) * M_PI;
+  const float half_angle_rad = sector_angle_rad / 2.0f;
+  const float origin_x = output_size.x / 2.0f;
+  const float origin_y = 0.0f;
+  const float px = static_cast<float>(index.x);
+  const float py = static_cast<float>(index.y);
+
+  if (py == 0.0f && fabsf(px - origin_x) > (output_size.x / 2.0f * 0.1f)) { return; }
+
+  float theta;
+  float depth;
+  if (py == 0.0f) {
+    theta = (px - origin_x) / origin_x * half_angle_rad;
+    depth = 0.0f;
+  } else {
+    theta = atan2f(px - origin_x, py - origin_y);
+    depth = sqrtf((px - origin_x) * (px - origin_x) + (py - origin_y) * (py - origin_y));
+    depth = depth * far / output_size.y;
+  }
+  if (fabsf(theta) > half_angle_rad) { return; }
+  if (depth > far) { return; }
+
+  const float source_y = (theta + half_angle_rad) / sector_angle_rad;
+  const float source_x = depth / far;
+  output[index.y * output_size.x + index.x] = fetch_uint32_nn(input, input_size, source_x, source_y);
+}
+
 CUDAAlgorithms::CUDAAlgorithms()
     : normalize_launcher_((void*)&normalize_kernel),
       convolve_rows_launcher_((void*)&convolve_rows_kernel),
@@ -451,7 +567,10 @@ CUDAAlgorithms::CUDAAlgorithms()
       median_clip_launcher_((void*)&median_clip_kernel),
       scan_convert_curvilinear_launcher_((void*)&scan_convert_curvilinear_kernel),
       scan_convert_linear_launcher_((void*)&scan_convert_linear_kernel),
-      scan_convert_phased_launcher_((void*)&scan_convert_phased_kernel) {
+      scan_convert_phased_launcher_((void*)&scan_convert_phased_kernel),
+      scan_convert_curvilinear_uint32_launcher_((void*)&scan_convert_curvilinear_uint32_kernel),
+      scan_convert_linear_uint32_launcher_((void*)&scan_convert_linear_uint32_kernel),
+      scan_convert_phased_uint32_launcher_((void*)&scan_convert_phased_uint32_kernel) {
   CUDA_CHECK(cudaFuncSetAttribute(hilbert_kernel,
                                   cudaFuncAttributeMaxDynamicSharedMemorySize,
                                   HilbertForwardFFT::shared_memory_size));
@@ -731,6 +850,65 @@ std::unique_ptr<CudaMemory> CUDAAlgorithms::scan_convert_phased(CudaMemory* scan
                                        sector_angle,
                                        far);
 
+  return std::move(grid_z);
+}
+
+std::unique_ptr<CudaMemory> CUDAAlgorithms::scan_convert_curvilinear_uint32(
+    CudaMemory* scan_lines, uint2 input_size, float sector_angle, float near, float far,
+    uint2 output_size, cudaStream_t stream) {
+  auto grid_z =
+      std::make_unique<CudaMemory>(output_size.x * output_size.y * sizeof(uint32_t), stream);
+
+  const float sector_angle_rad = (sector_angle / 360.f) * 2.f * M_PI;
+  const float max_x = std::sin(sector_angle_rad * 0.5f);
+  const float min_z = std::cos(sector_angle_rad * 0.5f) * (near / far);
+
+  scan_convert_curvilinear_uint32_launcher_.launch(
+      output_size,
+      stream,
+      reinterpret_cast<const uint32_t*>(scan_lines->get_ptr(stream)),
+      input_size,
+      reinterpret_cast<uint32_t*>(grid_z->get_ptr(stream)),
+      output_size,
+      sector_angle_rad,
+      near / far,
+      far / far,
+      max_x,
+      min_z);
+  return std::move(grid_z);
+}
+
+std::unique_ptr<CudaMemory> CUDAAlgorithms::scan_convert_linear_uint32(
+    CudaMemory* scan_lines, uint2 input_size, float width, float far, uint2 output_size,
+    cudaStream_t stream) {
+  auto grid_z =
+      std::make_unique<CudaMemory>(output_size.x * output_size.y * sizeof(uint32_t), stream);
+  scan_convert_linear_uint32_launcher_.launch(
+      output_size,
+      stream,
+      reinterpret_cast<const uint32_t*>(scan_lines->get_ptr(stream)),
+      input_size,
+      reinterpret_cast<uint32_t*>(grid_z->get_ptr(stream)),
+      output_size,
+      width,
+      far);
+  return std::move(grid_z);
+}
+
+std::unique_ptr<CudaMemory> CUDAAlgorithms::scan_convert_phased_uint32(
+    CudaMemory* scan_lines, uint2 input_size, float sector_angle, float far, uint2 output_size,
+    cudaStream_t stream) {
+  auto grid_z =
+      std::make_unique<CudaMemory>(output_size.x * output_size.y * sizeof(uint32_t), stream);
+  scan_convert_phased_uint32_launcher_.launch(
+      output_size,
+      stream,
+      reinterpret_cast<const uint32_t*>(scan_lines->get_ptr(stream)),
+      input_size,
+      reinterpret_cast<uint32_t*>(grid_z->get_ptr(stream)),
+      output_size,
+      sector_angle,
+      far);
   return std::move(grid_z);
 }
 

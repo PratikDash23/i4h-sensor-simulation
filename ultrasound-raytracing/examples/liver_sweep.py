@@ -78,8 +78,9 @@ for i, z in tqdm(enumerate(z_positions), total=len(z_positions)):
     rotation = np.array([-np.pi / 2, np.pi, 0], dtype=np.float32)
     probe = rs.CurvilinearProbe(rs.Pose(position=position, rotation=rotation))
 
-    # Run simulation
-    b_mode_image = simulator.simulate(probe, sim_params)
+    # Run simulation. simulate() now returns (b_mode, organ_ids, material_ids);
+    # this script only needs the B-mode image.
+    b_mode_image, _organ_ids, _material_ids = simulator.simulate(probe, sim_params)
 
     normalized_image = np.clip((b_mode_image - min_val) / (max_val - min_val), 0, 1)
 

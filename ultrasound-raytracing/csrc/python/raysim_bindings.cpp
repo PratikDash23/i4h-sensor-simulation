@@ -518,17 +518,30 @@ Elements steer beams electronically to create a sector image from a small footpr
                 spdlog::error("Simulation returned null b_mode");
                 throw std::runtime_error("Simulation returned null b_mode");
               }
-
-              const uint32_t elements = result.b_mode->get_size() / sizeof(float);
-              auto host_data = std::unique_ptr<float[]>(new float[elements]);
-              result.b_mode->download(host_data.get(), cudaStreamDefault);
+              if (!result.organ_ids || !result.material_ids) {
+                spdlog::error("Simulation returned null id buffers");
+                throw std::runtime_error("Simulation returned null id buffers");
+              }
 
               std::vector<ssize_t> shape = {static_cast<ssize_t>(params.b_mode_size.y),
                                             static_cast<ssize_t>(params.b_mode_size.x)};
 
-              auto array = py::array_t<float>(shape, host_data.get());
+              const uint32_t pixel_count = params.b_mode_size.y * params.b_mode_size.x;
+
+              auto b_mode_host = std::unique_ptr<float[]>(new float[pixel_count]);
+              result.b_mode->download(b_mode_host.get(), cudaStreamDefault);
+              auto b_mode_array = py::array_t<float>(shape, b_mode_host.get());
+
+              auto organ_host = std::unique_ptr<uint32_t[]>(new uint32_t[pixel_count]);
+              result.organ_ids->download(organ_host.get(), cudaStreamDefault);
+              auto organ_array = py::array_t<uint32_t>(shape, organ_host.get());
+
+              auto material_host = std::unique_ptr<uint32_t[]>(new uint32_t[pixel_count]);
+              result.material_ids->download(material_host.get(), cudaStreamDefault);
+              auto material_array = py::array_t<uint32_t>(shape, material_host.get());
+
               spdlog::info("Simulation completed successfully");
-              return array;
+              return py::make_tuple(b_mode_array, organ_array, material_array);
             } catch (const std::exception& e) {
               spdlog::error("Exception in simulate: {}", e.what());
               throw;
@@ -542,7 +555,10 @@ Elements steer beams electronically to create a sector image from a small footpr
             params: SimParams instance with simulation settings
 
         Returns:
-            np.ndarray: B-mode ultrasound image
+            Tuple of three numpy arrays, all shape (H, W):
+              - b_mode (float32): grayscale B-mode image (dB-clipped log-compressed amplitude)
+              - organ_ids (uint32): per-pixel organ index = `world.add()` call order; UINT32_MAX = background
+              - material_ids (uint32): per-pixel material index from the Materials catalog; UINT32_MAX = background
       )pbdoc");
 
   // Bind Hitable base class

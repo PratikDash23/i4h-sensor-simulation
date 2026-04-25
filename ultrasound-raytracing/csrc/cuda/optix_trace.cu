@@ -79,30 +79,57 @@ static __device__ float get_intensity_at_distance(float distance, float medium_a
  *
  * @param origin ray origin in world space
  * @param dir ray direction in world space
- * @param t_ancestors
- * @param t_min
- * @param t_max
- * @param intensity
- * @param material
- * @param intensities
+ * @param t_ancestors accumulated ray length from prior segments [mm]
+ * @param t_min start of the current segment along the ray [mm]
+ * @param t_max end of the current segment along the ray [mm]
+ * @param intensity ray intensity carried into this segment
+ * @param material material the ray is currently traveling through
+ * @param organ_id current organ id (= GAS index in world add() order); stamped
+ *                 into every depth bin this loop touches so speckle pixels
+ *                 carry a label
+ * @param material_id current material id; stamped into the parallel buffer
+ * @param intensities scanline scattering buffer (already advanced to this
+ *                    line's base; this fn applies the t_ancestors+t_min offset)
+ * @param organ_ids_out parallel uint32 buffer for organ labels (same layout
+ *                      as `intensities`). Boundary writes from the caller
+ *                      naturally overwrite the boundary's bin afterwards.
+ * @param material_ids_out parallel uint32 buffer for material labels
  */
 static __device__ void sample_intensities(float3 origin, float3 dir, float t_ancestors, float t_min,
                                           float t_max, float intensity, const Material* material,
-                                          float* intensities) {
-  // Early out for materials with zero scattering density or coefficient
-  if ((material->mu0_ <= 0.f) || (material->sigma_ == 0.f)) { return; }
+                                          uint32_t organ_id, uint32_t material_id,
+                                          float* intensities, uint32_t* organ_ids_out,
+                                          uint32_t* material_ids_out) {
+  // Materials with zero scattering produce no echo, but we still want every depth
+  // bin in this segment to carry a label (otherwise water/blood interior would
+  // read as background sentinel). Fall through to a label-only loop in that case.
+  const bool skip_scatter = (material->mu0_ <= 0.f) || (material->sigma_ == 0.f);
 
   const uint32_t steps = ((t_max - t_min) / params.t_far) * params.buffer_size + 0.5f;
+  if (steps == 0) { return; }
   const float t_step = (t_max - t_min) / steps;
   const float3 start = origin + t_min * dir;
 
-  intensities += get_intensity_offset(t_ancestors + t_min);
+  const uint32_t base_offset = get_intensity_offset(t_ancestors + t_min);
+  intensities += base_offset;
+  organ_ids_out += base_offset;
+  material_ids_out += base_offset;
+
+  if (skip_scatter) {
+    for (uint32_t step = 0; step < steps; ++step) {
+      organ_ids_out[step] = organ_id;
+      material_ids_out[step] = material_id;
+    }
+    return;
+  }
 
   for (uint32_t step = 0; step < steps; ++step) {
     const float distance = (step * t_step);
     const float3 pos = start + distance * dir;
     intensities[step] += get_scattering_value(pos, material) * intensity *
                          get_intensity_at_distance(distance, material->attenuation_);
+    organ_ids_out[step] = organ_id;
+    material_ids_out[step] = material_id;
   }
 }
 
@@ -379,6 +406,8 @@ extern "C" __global__ void __miss__ms() {
   if (params.contact_epsilon > 0.f && ray.depth == 0) { return; }
 
   // no hits, just do scattering up to t_far
+  const uint32_t scanline_offset =
+      (idx.y * optixGetLaunchDimensions().x + idx.x) * params.buffer_size;
   sample_intensities(
       optixGetWorldRayOrigin(),
       optixGetWorldRayDirection(),
@@ -387,7 +416,11 @@ extern "C" __global__ void __miss__ms() {
       optixGetRayTmax(),
       ray.intensity,
       &params.materials[ray.current_material_id],
-      &params.scanlines[(idx.y * optixGetLaunchDimensions().x + idx.x) * params.buffer_size]);
+      static_cast<uint32_t>(ray.current_obj_id),
+      static_cast<uint32_t>(ray.current_material_id),
+      &params.scanlines[scanline_offset],
+      &params.organ_ids[scanline_offset],
+      &params.material_ids[scanline_offset]);
 }
 
 template <OptixPrimitiveType PRIM_TYPE>
@@ -407,12 +440,25 @@ static __device__ void closest_hit() {
   const uint32_t current_material_id = ray.current_material_id;
   const Material* current_material = &params.materials[current_material_id];
   const uint3 idx = optixGetLaunchIndex();
-  float* const scanline =
-      &params.scanlines[(idx.y * optixGetLaunchDimensions().x + idx.x) * params.buffer_size];
+  const uint32_t scanline_offset =
+      (idx.y * optixGetLaunchDimensions().x + idx.x) * params.buffer_size;
+  float* const scanline = &params.scanlines[scanline_offset];
+  uint32_t* const organ_ids_line = &params.organ_ids[scanline_offset];
+  uint32_t* const material_ids_line = &params.material_ids[scanline_offset];
 
   // add scattering contribution up to hit
-  sample_intensities(
-      ray_orig, ray_dir, ray.t_ancestors, t_min, t, ray.intensity, current_material, scanline);
+  sample_intensities(ray_orig,
+                     ray_dir,
+                     ray.t_ancestors,
+                     t_min,
+                     t,
+                     ray.intensity,
+                     current_material,
+                     static_cast<uint32_t>(ray.current_obj_id),
+                     static_cast<uint32_t>(ray.current_material_id),
+                     scanline,
+                     organ_ids_line,
+                     material_ids_line);
 
   // Don't generate secondary rays is max depth is reached
   if (ray.depth + 1 >= params.max_depth) { return; }
@@ -458,7 +504,13 @@ static __device__ void closest_hit() {
                                                                  ray_dir,
                                                                  next_material->specularity_) *
                                     ray_coherence_attenuation;
-  scanline[get_intensity_offset(ray.t_ancestors + t)] = 2.f * specular_reflection;
+  const uint32_t boundary_offset = get_intensity_offset(ray.t_ancestors + t);
+  scanline[boundary_offset] = 2.f * specular_reflection;
+  // Boundary pixel is attributed to the organ/material the ray is refracting INTO
+  // (the bright echo comes from crossing into that medium). This overwrites
+  // whatever the speckle loop wrote at this exact bin.
+  organ_ids_line[boundary_offset] = static_cast<uint32_t>(next_obj_id);
+  material_ids_line[boundary_offset] = static_cast<uint32_t>(next_material_id);
 
   // Self-intersection avoidance
   float3 front_start, back_start, wld_norm;

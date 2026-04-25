@@ -61,6 +61,12 @@ class RaytracingUltrasoundSimulator {
   struct SimResult {
     std::unique_ptr<CudaMemory> rf_data;
     std::unique_ptr<CudaMemory> b_mode;
+    /// Per-pixel organ id, post scan-conversion, uint32. Sentinel UINT32_MAX = background.
+    /// Same shape as `b_mode` (rows = b_mode_size.y, cols = b_mode_size.x).
+    std::unique_ptr<CudaMemory> organ_ids;
+    /// Per-pixel material id, post scan-conversion, uint32. Sentinel UINT32_MAX = background.
+    /// Same shape as `b_mode`.
+    std::unique_ptr<CudaMemory> material_ids;
   };
 
   /**

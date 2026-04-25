@@ -24,7 +24,13 @@ import numpy as np
 import raysim.cuda as rs
 from flask import Flask, jsonify, request, send_file
 from flask_cors import CORS
-from PIL import Image
+from matplotlib import colormaps
+from PIL import Image, ImageDraw, ImageFont
+
+# Sentinel value emitted by the C++ scan converter for pixels outside the
+# imaging region (no organ / no material).
+ID_BACKGROUND = np.uint32(0xFFFFFFFF)
+OVERLAY_ALPHA = 0.5
 
 app = Flask(__name__)
 CORS(app)
@@ -78,6 +84,137 @@ world.add(small_intestine_mesh)
 material_idx = materials.get_index("water")
 large_intestine_mesh = rs.Mesh(mesh_path("Colon.obj"), material_idx)
 world.add(large_intestine_mesh)
+
+# Display names indexed by world.add() order — must mirror the calls above.
+# The simulator returns per-pixel `organ_ids` whose values are GAS indices
+# assigned by World::add(), so this list maps id -> human-readable label.
+organ_names = [
+    "Tumor1", "Tumor2", "Liver", "Skin", "Bone", "Vessels", "Gallbladder",
+    "Spleen", "Heart", "Stomach", "Pancreas", "Small_bowel", "Colon",
+]
+
+
+def _build_organ_palette(n):
+    """Return an (n, 3) uint8 RGB palette that stays discernible as N grows.
+
+    Up to 20 organs uses matplotlib's `tab20` (a hand-tuned categorical map).
+    Beyond that we fall back to evenly-spaced HSV hues which scales without
+    repeating colors.
+    """
+    if n <= 20:
+        cmap = colormaps["tab20"]
+        rgba = np.asarray([cmap(i / max(19, 1)) for i in range(n)])
+    else:
+        cmap = colormaps["hsv"]
+        rgba = np.asarray([cmap(i / n) for i in range(n)])
+    return (rgba[:, :3] * 255).astype(np.uint8)
+
+
+organ_palette = _build_organ_palette(len(organ_names))
+
+# Cached drawing context just to call textbbox without allocating a new
+# ImageDraw per measurement.
+_LEGEND_FONT = ImageFont.load_default()
+_LEGEND_MEASURE_DRAW = ImageDraw.Draw(Image.new("RGB", (1, 1)))
+
+
+def _measure_text(text):
+    bbox = _LEGEND_MEASURE_DRAW.textbbox((0, 0), text, font=_LEGEND_FONT)
+    return bbox[2] - bbox[0], bbox[3] - bbox[1]
+
+
+def _compose_overlay(b_mode_uint8, organ_ids, palette, alpha=OVERLAY_ALPHA):
+    """Alpha-blend per-pixel organ colors on top of the grayscale B-mode image.
+
+    Background pixels (id == UINT32_MAX) and any ids past the palette length
+    pass through as plain grayscale.
+    """
+    gray_rgb = np.repeat(b_mode_uint8[:, :, None], 3, axis=2).astype(np.float32)
+    valid = (organ_ids != ID_BACKGROUND) & (organ_ids < len(palette))
+    if not valid.any():
+        return gray_rgb.astype(np.uint8)
+    organ_rgb = palette[organ_ids.clip(max=len(palette) - 1)].astype(np.float32)
+    blended = alpha * organ_rgb + (1.0 - alpha) * gray_rgb
+    out = gray_rgb.copy()
+    out[valid] = blended[valid]
+    return out.astype(np.uint8)
+
+
+def _render_legend_bottom(width, names, palette):
+    """Multi-row legend strip sized to a given image width."""
+    swatch = 12
+    inner_gap = 4
+    entry_gap = 12
+    row_h = 18
+    pad = 6
+
+    entry_widths = [
+        swatch + inner_gap + _measure_text(name)[0] + entry_gap
+        for name in names
+    ]
+    rows, current, current_w = [], [], 0
+    for i, ew in enumerate(entry_widths):
+        if current and current_w + ew > width - 2 * pad:
+            rows.append(current)
+            current, current_w = [], 0
+        current.append(i)
+        current_w += ew
+    if current:
+        rows.append(current)
+
+    legend_h = pad * 2 + row_h * len(rows)
+    img = Image.new("RGB", (width, legend_h), (255, 255, 255))
+    draw = ImageDraw.Draw(img)
+    y = pad
+    for row in rows:
+        x = pad
+        for i in row:
+            r, g, b = (int(c) for c in palette[i])
+            draw.rectangle([x, y + 2, x + swatch, y + 2 + swatch],
+                           fill=(r, g, b), outline=(0, 0, 0))
+            draw.text((x + swatch + inner_gap, y + 1), names[i],
+                      fill=(0, 0, 0), font=_LEGEND_FONT)
+            x += swatch + inner_gap + _measure_text(names[i])[0] + entry_gap
+        y += row_h
+    return img
+
+
+def _render_legend_right(height, names, palette, width=150):
+    """Vertical legend strip of fixed width (default 150 px)."""
+    swatch = 12
+    inner_gap = 6
+    row_h = 18
+    pad = 6
+    img = Image.new("RGB", (width, height), (255, 255, 255))
+    draw = ImageDraw.Draw(img)
+    y = pad
+    for i, name in enumerate(names):
+        if y + row_h > height - pad:
+            break  # truncate silently if image is too short for all entries
+        r, g, b = (int(c) for c in palette[i])
+        draw.rectangle([pad, y + 2, pad + swatch, y + 2 + swatch],
+                       fill=(r, g, b), outline=(0, 0, 0))
+        draw.text((pad + swatch + inner_gap, y + 1), name,
+                  fill=(0, 0, 0), font=_LEGEND_FONT)
+        y += row_h
+    return img
+
+
+def _attach_legend(image_rgb, names, palette, layout="bottom"):
+    h, w = image_rgb.shape[:2]
+    base = Image.fromarray(image_rgb, mode="RGB")
+    if layout == "right":
+        legend = _render_legend_right(h, names, palette)
+        canvas = Image.new("RGB", (w + legend.width, h), (255, 255, 255))
+        canvas.paste(base, (0, 0))
+        canvas.paste(legend, (w, 0))
+    else:
+        legend = _render_legend_bottom(w, names, palette)
+        canvas = Image.new("RGB", (w, h + legend.height), (255, 255, 255))
+        canvas.paste(base, (0, 0))
+        canvas.paste(legend, (0, h))
+    return canvas
+
 
 # Initial poses for different probe types
 initial_poses = {
@@ -234,6 +371,9 @@ def set_frequency():
 @app.route("/simulate", methods=["POST"])
 def simulate():
     pose_delta = request.json["pose_delta"]
+    # `?layout=right` lays the legend to the right (+150 px) for save/download;
+    # default `bottom` keeps the image width the same for the interactive UI.
+    layout = request.args.get("layout", "bottom")
     print(f"Applying delta: {pose_delta}")
 
     # Get current pose
@@ -251,21 +391,25 @@ def simulate():
     new_pose = rs.Pose(new_position, new_rotation)
     probes[active_probe].set_pose(new_pose)
 
-    b_mode_image = simulator.simulate(probes[active_probe], sim_params)
+    # The simulator returns three (H, W) arrays: the float32 dB-clipped B-mode
+    # image and two uint32 categorical id maps (organ + material). We use the
+    # organ ids for the visible overlay; material ids are kept unused here but
+    # available for downstream consumers.
+    b_mode_image, organ_ids, _material_ids = simulator.simulate(
+        probes[active_probe], sim_params)
 
     # Apply normalization as in C++ code
     min_val = -60.0  # Matching C++ min_max.x
     max_val = 0.0  # Matching C++ min_max.y
     normalized_image = np.clip((b_mode_image - min_val) / (max_val - min_val), 0, 1)
 
-    # Convert to 8-bit image for display
+    # Convert to 8-bit grayscale and alpha-blend the organ map on top.
     img_uint8 = (normalized_image * 255).astype(np.uint8)
-
-    # Convert to PIL Image
-    pil_img = Image.fromarray(img_uint8)
+    overlay_rgb = _compose_overlay(img_uint8, organ_ids, organ_palette)
+    composite = _attach_legend(overlay_rgb, organ_names, organ_palette, layout=layout)
 
     img_io = io.BytesIO()
-    pil_img.save(img_io, "PNG")
+    composite.save(img_io, "PNG")
     img_io.seek(0)
 
     # Return the image and the current probe type

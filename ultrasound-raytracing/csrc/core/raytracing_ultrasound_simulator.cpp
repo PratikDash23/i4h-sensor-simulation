@@ -270,6 +270,17 @@ RaytracingUltrasoundSimulator::SimResult RaytracingUltrasoundSimulator::simulate
   CUDA_CHECK(cudaMemsetAsync(
       d_scanlines->get_ptr(sim_params.stream), 0, d_scanlines->get_size(), sim_params.stream));
 
+  // Parallel uint32 buffers for organ id and material id (same shape as d_scanlines).
+  // Init bytes to 0xFF so each uint32 reads as UINT32_MAX (background sentinel).
+  const size_t id_buffer_bytes = sim_params.buffer_size * probe->get_num_elements() *
+                                 probe->get_num_el_samples() * sizeof(uint32_t);
+  auto d_organ_ids = std::make_unique<CudaMemory>(id_buffer_bytes, sim_params.stream);
+  auto d_material_ids = std::make_unique<CudaMemory>(id_buffer_bytes, sim_params.stream);
+  CUDA_CHECK(cudaMemsetAsync(
+      d_organ_ids->get_ptr(sim_params.stream), 0xFF, id_buffer_bytes, sim_params.stream));
+  CUDA_CHECK(cudaMemsetAsync(
+      d_material_ids->get_ptr(sim_params.stream), 0xFF, id_buffer_bytes, sim_params.stream));
+
   {
     CudaTiming cuda_timing(sim_params.enable_cuda_timing, "OptiX", sim_params.stream);
 
@@ -278,6 +289,8 @@ RaytracingUltrasoundSimulator::SimResult RaytracingUltrasoundSimulator::simulate
     //
     Params params{};
     params.scanlines = reinterpret_cast<float*>(d_scanlines->get_ptr(sim_params.stream));
+    params.organ_ids = reinterpret_cast<uint32_t*>(d_organ_ids->get_ptr(sim_params.stream));
+    params.material_ids = reinterpret_cast<uint32_t*>(d_material_ids->get_ptr(sim_params.stream));
     params.buffer_size = sim_params.buffer_size;
     params.t_far = sim_params.t_far;
     params.min_intensity = sim_params.min_intensity;
@@ -486,9 +499,74 @@ RaytracingUltrasoundSimulator::SimResult RaytracingUltrasoundSimulator::simulate
   min_z_ = min_z;
   max_z_ = max_z;
 
+  // Centre-plane slice + nearest-neighbour scan conversion for the id buffers.
+  // Categorical labels can't be PSF-blurred or log-compressed, so we skip the
+  // entire image-assembly pipeline for them and just pick out one elevation plane
+  // (the centre one), then scan-convert with nearest-neighbour.
+  std::unique_ptr<CudaMemory> organ_ids_2d;
+  std::unique_ptr<CudaMemory> material_ids_2d;
+  {
+    CudaTiming cuda_timing(
+        sim_params.enable_cuda_timing, "Id scan conversion", sim_params.stream);
+
+    const uint32_t centre_plane = probe->get_num_el_samples() / 2;
+    const size_t plane_bytes =
+        sim_params.buffer_size * probe->get_num_elements() * sizeof(uint32_t);
+    auto d_organ_plane = std::make_unique<CudaMemory>(plane_bytes, sim_params.stream);
+    auto d_material_plane = std::make_unique<CudaMemory>(plane_bytes, sim_params.stream);
+
+    CUDA_CHECK(cudaMemcpyAsync(
+        d_organ_plane->get_ptr(sim_params.stream),
+        static_cast<char*>(d_organ_ids->get_ptr(sim_params.stream)) + centre_plane * plane_bytes,
+        plane_bytes,
+        cudaMemcpyDeviceToDevice,
+        sim_params.stream));
+    CUDA_CHECK(cudaMemcpyAsync(
+        d_material_plane->get_ptr(sim_params.stream),
+        static_cast<char*>(d_material_ids->get_ptr(sim_params.stream)) + centre_plane * plane_bytes,
+        plane_bytes,
+        cudaMemcpyDeviceToDevice,
+        sim_params.stream));
+
+    auto run_uint32_scan_convert =
+        [&](CudaMemory* in) -> std::unique_ptr<CudaMemory> {
+      switch (probe->get_probe_type()) {
+        case ProbeType::PROBE_TYPE_PHASED_ARRAY:
+          return cuda_algorithms_->scan_convert_phased_uint32(in,
+                                                              plane_size,
+                                                              probe->get_sector_angle(),
+                                                              sim_params.t_far,
+                                                              sim_params.b_mode_size,
+                                                              sim_params.stream);
+        case ProbeType::PROBE_TYPE_LINEAR_ARRAY:
+          return cuda_algorithms_->scan_convert_linear_uint32(in,
+                                                              plane_size,
+                                                              probe->get_width(),
+                                                              sim_params.t_far,
+                                                              sim_params.b_mode_size,
+                                                              sim_params.stream);
+        case ProbeType::PROBE_TYPE_CURVILINEAR:
+        default:
+          return cuda_algorithms_->scan_convert_curvilinear_uint32(
+              in,
+              plane_size,
+              probe->get_sector_angle(),
+              probe->get_radius(),
+              sim_params.t_far + probe->get_radius(),
+              sim_params.b_mode_size,
+              sim_params.stream);
+      }
+    };
+
+    organ_ids_2d = run_uint32_scan_convert(d_organ_plane.get());
+    material_ids_2d = run_uint32_scan_convert(d_material_plane.get());
+  }
+
   SimResult result;
   result.rf_data = std::move(d_scanlines);
   result.b_mode = std::move(b_mode);
+  result.organ_ids = std::move(organ_ids_2d);
+  result.material_ids = std::move(material_ids_2d);
 
   return result;
 }
