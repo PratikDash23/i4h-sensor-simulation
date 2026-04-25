@@ -208,6 +208,10 @@
                             <input type="checkbox" id="writeDebugImages" name="writeDebugImages">
                             <span>Write Debug Images</span>
                         </label>
+                        <label style="display: flex; align-items: center; gap: 8px; margin: 8px 0;">
+                            <input type="checkbox" id="showOrganOverlay" name="showOrganOverlay" checked>
+                            <span>Organ Overlay</span>
+                        </label>
                         <div style="margin-top: 12px;">
                             <label for="contactEpsilon" style="display: flex; align-items: center; gap: 8px; margin: 8px 0;">
                                 <span>Contact Epsilon (mm):</span>
@@ -431,6 +435,7 @@
                     document.getElementById('enableCudaTiming').checked = params.enable_cuda_timing;
                     document.getElementById('writeDebugImages').checked = params.write_debug_images;
                     document.getElementById('contactEpsilon').value = params.contact_epsilon;
+                    document.getElementById('showOrganOverlay').checked = params.show_organ_overlay;
                 }
             } catch (error) {
                 console.error('Error fetching simulation parameters:', error);
@@ -596,6 +601,10 @@
 
             document.getElementById('contactEpsilon').addEventListener('change', (e) => {
                 updateSimParams('contact_epsilon', parseFloat(e.target.value));
+            });
+
+            document.getElementById('showOrganOverlay').addEventListener('change', (e) => {
+                updateSimParams('show_organ_overlay', e.target.checked);
             });
 
             // Fetch available probe types

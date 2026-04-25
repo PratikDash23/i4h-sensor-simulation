@@ -276,6 +276,11 @@ sim_params.t_far = 180.0
 sim_params.enable_cuda_timing = True
 sim_params.median_clip_filter = False
 
+# Render-time toggle: when False, /simulate returns the plain grayscale B-mode
+# without the organ color overlay or legend. Not part of the C++ SimParams since
+# it only affects PNG composition in this server.
+show_organ_overlay = True
+
 
 @app.route("/")
 def home():
@@ -314,13 +319,15 @@ def get_sim_params():
         "median_clip_filter": sim_params.median_clip_filter,
         "enable_cuda_timing": sim_params.enable_cuda_timing,
         "write_debug_images": sim_params.write_debug_images,
-        "contact_epsilon": sim_params.contact_epsilon
+        "contact_epsilon": sim_params.contact_epsilon,
+        "show_organ_overlay": show_organ_overlay,
     }
 
 
 @app.route("/set_sim_params", methods=["POST"])
 def set_sim_params():
     """Update simulation parameters"""
+    global show_organ_overlay
     try:
         params = request.json
 
@@ -336,13 +343,17 @@ def set_sim_params():
         if "contact_epsilon" in params:
             sim_params.contact_epsilon = float(params["contact_epsilon"])
 
+        if "show_organ_overlay" in params:
+            show_organ_overlay = bool(params["show_organ_overlay"])
+
         return {
             "status": "success",
             "params": {
                 "median_clip_filter": sim_params.median_clip_filter,
                 "enable_cuda_timing": sim_params.enable_cuda_timing,
                 "write_debug_images": sim_params.write_debug_images,
-                "contact_epsilon": sim_params.contact_epsilon
+                "contact_epsilon": sim_params.contact_epsilon,
+                "show_organ_overlay": show_organ_overlay,
             }
         }
     except Exception as e:
@@ -403,10 +414,15 @@ def simulate():
     max_val = 0.0  # Matching C++ min_max.y
     normalized_image = np.clip((b_mode_image - min_val) / (max_val - min_val), 0, 1)
 
-    # Convert to 8-bit grayscale and alpha-blend the organ map on top.
+    # Convert to 8-bit grayscale. With the overlay enabled, alpha-blend the
+    # organ map on top and append the legend; otherwise return plain grayscale.
     img_uint8 = (normalized_image * 255).astype(np.uint8)
-    overlay_rgb = _compose_overlay(img_uint8, organ_ids, organ_palette)
-    composite = _attach_legend(overlay_rgb, organ_names, organ_palette, layout=layout)
+    if show_organ_overlay:
+        overlay_rgb = _compose_overlay(img_uint8, organ_ids, organ_palette)
+        composite = _attach_legend(overlay_rgb, organ_names, organ_palette, layout=layout)
+    else:
+        gray_rgb = np.repeat(img_uint8[:, :, None], 3, axis=2)
+        composite = Image.fromarray(gray_rgb, mode="RGB")
 
     img_io = io.BytesIO()
     composite.save(img_io, "PNG")
