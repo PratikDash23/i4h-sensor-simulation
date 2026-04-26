@@ -212,6 +212,27 @@
                             <input type="checkbox" id="showOrganOverlay" name="showOrganOverlay" checked>
                             <span>Organ Overlay</span>
                         </label>
+                        <div style="margin-top: 8px;">
+                            <label for="overlayAlpha" style="display: block; margin-bottom: 4px;">Overlay Opacity:</label>
+                            <div style="display: flex; align-items: center; gap: 8px;">
+                                <input type="range" id="overlayAlpha" min="0" max="1" step="0.05" value="0.5" style="flex: 1;">
+                                <span id="overlayAlphaValue" style="min-width: 40px; font-weight: 600;">0.50</span>
+                            </div>
+                        </div>
+                        <div style="margin-top: 8px;">
+                            <label for="minDb" style="display: block; margin-bottom: 4px;">Min dB (noise floor):</label>
+                            <div style="display: flex; align-items: center; gap: 8px;">
+                                <input type="range" id="minDb" min="-100" max="-10" step="1" value="-60" style="flex: 1;">
+                                <span id="minDbValue" style="min-width: 50px; font-weight: 600;">-60</span>
+                            </div>
+                        </div>
+                        <div style="margin-top: 8px;">
+                            <label for="maxDb" style="display: block; margin-bottom: 4px;">Max dB (peak):</label>
+                            <div style="display: flex; align-items: center; gap: 8px;">
+                                <input type="range" id="maxDb" min="-20" max="10" step="1" value="0" style="flex: 1;">
+                                <span id="maxDbValue" style="min-width: 50px; font-weight: 600;">0</span>
+                            </div>
+                        </div>
                         <div style="margin-top: 12px;">
                             <label for="contactEpsilon" style="display: flex; align-items: center; gap: 8px; margin: 8px 0;">
                                 <span>Contact Epsilon (mm):</span>
@@ -436,6 +457,12 @@
                     document.getElementById('writeDebugImages').checked = params.write_debug_images;
                     document.getElementById('contactEpsilon').value = params.contact_epsilon;
                     document.getElementById('showOrganOverlay').checked = params.show_organ_overlay;
+                    document.getElementById('overlayAlpha').value = params.overlay_alpha;
+                    document.getElementById('overlayAlphaValue').textContent = parseFloat(params.overlay_alpha).toFixed(2);
+                    document.getElementById('minDb').value = params.min_db;
+                    document.getElementById('minDbValue').textContent = params.min_db.toFixed(0);
+                    document.getElementById('maxDb').value = params.max_db;
+                    document.getElementById('maxDbValue').textContent = params.max_db.toFixed(0);
                 }
             } catch (error) {
                 console.error('Error fetching simulation parameters:', error);
@@ -605,6 +632,27 @@
 
             document.getElementById('showOrganOverlay').addEventListener('change', (e) => {
                 updateSimParams('show_organ_overlay', e.target.checked);
+            });
+
+            document.getElementById('overlayAlpha').addEventListener('input', (e) => {
+                document.getElementById('overlayAlphaValue').textContent = parseFloat(e.target.value).toFixed(2);
+            });
+            document.getElementById('overlayAlpha').addEventListener('change', (e) => {
+                updateSimParams('overlay_alpha', parseFloat(e.target.value));
+            });
+
+            document.getElementById('minDb').addEventListener('input', (e) => {
+                document.getElementById('minDbValue').textContent = parseFloat(e.target.value).toFixed(0);
+            });
+            document.getElementById('minDb').addEventListener('change', (e) => {
+                updateSimParams('min_db', parseFloat(e.target.value));
+            });
+
+            document.getElementById('maxDb').addEventListener('input', (e) => {
+                document.getElementById('maxDbValue').textContent = parseFloat(e.target.value).toFixed(0);
+            });
+            document.getElementById('maxDb').addEventListener('change', (e) => {
+                updateSimParams('max_db', parseFloat(e.target.value));
             });
 
             // Fetch available probe types

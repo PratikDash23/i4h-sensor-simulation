@@ -30,7 +30,14 @@ from PIL import Image, ImageDraw, ImageFont
 # Sentinel value emitted by the C++ scan converter for pixels outside the
 # imaging region (no organ / no material).
 ID_BACKGROUND = np.uint32(0xFFFFFFFF)
-OVERLAY_ALPHA = 0.5
+# Render-time alpha for the organ overlay (0=B-mode only, 1=labels only).
+# Mutable so /set_sim_params can change it live from the UI slider.
+overlay_alpha = 0.5
+
+# Dynamic range (dB) for B-mode log-compression normalization.
+# min_db = noise floor (clipped to black), max_db = peak (clipped to white).
+min_db = -60.0
+max_db = 0.0
 
 app = Flask(__name__)
 CORS(app)
@@ -123,7 +130,7 @@ def _measure_text(text):
     return bbox[2] - bbox[0], bbox[3] - bbox[1]
 
 
-def _compose_overlay(b_mode_uint8, organ_ids, palette, alpha=OVERLAY_ALPHA):
+def _compose_overlay(b_mode_uint8, organ_ids, palette, alpha=0.5):
     """Alpha-blend per-pixel organ colors on top of the grayscale B-mode image.
 
     Background pixels (id == UINT32_MAX) and any ids past the palette length
@@ -321,13 +328,16 @@ def get_sim_params():
         "write_debug_images": sim_params.write_debug_images,
         "contact_epsilon": sim_params.contact_epsilon,
         "show_organ_overlay": show_organ_overlay,
+        "overlay_alpha": overlay_alpha,
+        "min_db": min_db,
+        "max_db": max_db,
     }
 
 
 @app.route("/set_sim_params", methods=["POST"])
 def set_sim_params():
     """Update simulation parameters"""
-    global show_organ_overlay
+    global show_organ_overlay, overlay_alpha, min_db, max_db
     try:
         params = request.json
 
@@ -346,6 +356,15 @@ def set_sim_params():
         if "show_organ_overlay" in params:
             show_organ_overlay = bool(params["show_organ_overlay"])
 
+        if "overlay_alpha" in params:
+            overlay_alpha = float(np.clip(params["overlay_alpha"], 0.0, 1.0))
+
+        if "min_db" in params:
+            min_db = float(params["min_db"])
+
+        if "max_db" in params:
+            max_db = float(params["max_db"])
+
         return {
             "status": "success",
             "params": {
@@ -354,6 +373,9 @@ def set_sim_params():
                 "write_debug_images": sim_params.write_debug_images,
                 "contact_epsilon": sim_params.contact_epsilon,
                 "show_organ_overlay": show_organ_overlay,
+                "overlay_alpha": overlay_alpha,
+                "min_db": min_db,
+                "max_db": max_db,
             }
         }
     except Exception as e:
@@ -409,16 +431,16 @@ def simulate():
     b_mode_image, organ_ids, _material_ids = simulator.simulate(
         probes[active_probe], sim_params)
 
-    # Apply normalization as in C++ code
-    min_val = -60.0  # Matching C++ min_max.x
-    max_val = 0.0  # Matching C++ min_max.y
-    normalized_image = np.clip((b_mode_image - min_val) / (max_val - min_val), 0, 1)
+    # Apply dB-window normalization. Bounds come from the live sliders so the
+    # user can widen the floor (more shadow detail) or compress the window
+    # (more contrast) without restarting the server.
+    normalized_image = np.clip((b_mode_image - min_db) / (max_db - min_db), 0, 1)
 
     # Convert to 8-bit grayscale. With the overlay enabled, alpha-blend the
     # organ map on top and append the legend; otherwise return plain grayscale.
     img_uint8 = (normalized_image * 255).astype(np.uint8)
     if show_organ_overlay:
-        overlay_rgb = _compose_overlay(img_uint8, organ_ids, organ_palette)
+        overlay_rgb = _compose_overlay(img_uint8, organ_ids, organ_palette, alpha=overlay_alpha)
         composite = _attach_legend(overlay_rgb, organ_names, organ_palette, layout=layout)
     else:
         gray_rgb = np.repeat(img_uint8[:, :, None], 3, axis=2)
