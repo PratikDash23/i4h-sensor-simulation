@@ -285,7 +285,7 @@ sim_params.median_clip_filter = False
 # Speed-of-sound–aware echo placement. Default OFF preserves NVIDIA's original
 # geometric-binning behaviour (image lines up perfectly with mesh geometry).
 # Toggle ON via the UI checkbox to reproduce real-scanner SoS aberration.
-# See `simulated_US/tutorial/sos_aware_echo_placement.md` for the full design.
+# See `simulated_US/sos_aware_echo_placement.md` for the full design.
 sim_params.sos_aware = False
 sim_params.assumed_sos = 1540.0  # m/s — the scanner's TOF→displayed-depth assumption
 

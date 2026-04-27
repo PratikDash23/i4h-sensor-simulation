@@ -63,7 +63,7 @@ class RaytracingUltrasoundSimulator {
     // `assumed_sos`. This reproduces the speed-of-sound aberration a real B-mode scanner shows
     // when the actual tissue SoS differs from the scanner's TOF→depth assumption (~1540 m/s):
     // fat-rich paths show echoes ~6% deeper than truth, bone collapses echoes toward the surface,
-    // etc. See `simulated_US/tutorial/sos_aware_echo_placement.md` for the full design + math.
+    // etc. See `simulated_US/sos_aware_echo_placement.md` for the full design + math.
     bool sos_aware = false;
     float assumed_sos = 1540.f;                 // m/s; the scanner's TOF→displayed-depth assumption
     // --------------------------------------------------------------------------------------------
