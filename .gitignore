@@ -194,3 +194,8 @@ tools/
 **/output/
 ultrasound-raytracing/benchmark_results.txt
 ultrasound-raytracing/mesh
+
+# Optional Calibri Bold font, dropped in by the user for the depth-scale strip.
+# server.py falls back to the matplotlib-bundled DejaVuSans-Bold if these are absent.
+calibri.ttf
+calibrib.ttf

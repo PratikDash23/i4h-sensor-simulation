@@ -181,7 +181,18 @@ static __device__ void sample_intensities(float3 origin, float3 dir, float t_anc
   // read as background sentinel). Fall through to a label-only loop in that case.
   const bool skip_scatter = (material->mu0_ <= 0.f) || (material->sigma_ == 0.f);
 
-  const uint32_t steps = ((t_max - t_min) / params.t_far) * params.buffer_size + 0.5f;
+  // In SoS-aware mode, one geometric step maps to (assumed_sos / c_material) bins
+  // in displayed depth. For slow materials (c < assumed_sos) that ratio > 1, so
+  // the OFF-mode step density would skip ~1 bin in (ratio) — visible as black
+  // "no-echo" stripes inside fat-like regions. Inflate the step count by that
+  // ratio so every displayed-depth bin gets at least one write. The per-step
+  // speckle contribution is then divided by the same factor to keep the
+  // accumulated bin intensity comparable to OFF mode.
+  const float c_mps = material->speed_of_sound_;
+  const float density_factor = (params.sos_aware && params.assumed_sos > c_mps)
+                               ? (params.assumed_sos / c_mps) : 1.0f;
+  const uint32_t steps = ((t_max - t_min) / params.t_far) * params.buffer_size
+                         * density_factor + 0.5f;
   if (steps == 0) { return; }
   const float t_step = (t_max - t_min) / steps;
   const float3 start = origin + t_min * dir;
@@ -190,8 +201,6 @@ static __device__ void sample_intensities(float3 origin, float3 dir, float t_anc
   // Legacy (geometric): bin index of the segment's first sample.
   const uint32_t base_offset_geom = get_intensity_offset(t_ancestors + t_min);
   // SoS-aware (TOF): TOF at the segment's first sample, plus per-step TOF increment.
-  // c_mps is constant within a single material/segment, so both are loop invariants.
-  const float c_mps = material->speed_of_sound_;
   const float base_tof_us = tof_ancestors + distance_to_tof_us(t_min, c_mps);
   const float tof_step_us = distance_to_tof_us(t_step, c_mps);
 
@@ -219,13 +228,17 @@ static __device__ void sample_intensities(float3 origin, float3 dir, float t_anc
   }
 
   if (params.sos_aware) {
+    // density_factor > 1 in slow materials; per-step contribution scaled down
+    // by the same factor so the per-bin sum matches what OFF mode produces.
+    const float inv_density = 1.0f / density_factor;
     for (uint32_t step = 0; step < steps; ++step) {
       const float distance = (step * t_step);  // geometric mm into this segment
       const float3 pos = start + distance * dir;
       const uint32_t bin = offset_from_tof(base_tof_us + step * tof_step_us);
       // Beer-Lambert is distance-based (physics doesn't change with binning convention).
       intensities[bin] += get_scattering_value(pos, material) * intensity *
-                          get_intensity_at_distance(distance, material->attenuation_);
+                          get_intensity_at_distance(distance, material->attenuation_)
+                          * inv_density;
       organ_ids_out[bin] = organ_id;
       material_ids_out[bin] = material_id;
     }

@@ -122,7 +122,36 @@ organ_palette = _build_organ_palette(len(organ_names))
 
 # Cached drawing context just to call textbbox without allocating a new
 # ImageDraw per measurement.
-_LEGEND_FONT = ImageFont.load_default()
+try:
+    _LEGEND_FONT = ImageFont.truetype("/workspace/i4h-sim/calibrib.ttf", 22)
+except (IOError, OSError):
+    try:
+        import matplotlib as _mpl_for_legend
+        from pathlib import Path as _Path_legend
+        _LEGEND_FONT = ImageFont.truetype(
+            str(_Path_legend(_mpl_for_legend.__file__).parent
+                / "mpl-data" / "fonts" / "ttf" / "DejaVuSans-Bold.ttf"), 22)
+    except Exception:
+        _LEGEND_FONT = ImageFont.load_default()
+
+# Depth-scale fonts: Calibri Bold copied into /workspace/i4h-sim/ alongside
+# the bind-mounted source. Falls through to matplotlib's bundled DejaVu Bold,
+# then to the PIL bitmap default — never fails import.
+_CAL_BOLD = "/workspace/i4h-sim/calibrib.ttf"
+try:
+    _SCALE_FONT = ImageFont.truetype(_CAL_BOLD, 26)        # tick numbers
+    _SCALE_FONT_LABEL = ImageFont.truetype(_CAL_BOLD, 24)  # axis label
+except (IOError, OSError):
+    try:
+        import matplotlib as _mpl
+        from pathlib import Path as _Path
+        _ttf = str(_Path(_mpl.__file__).parent
+                   / "mpl-data" / "fonts" / "ttf" / "DejaVuSans-Bold.ttf")
+        _SCALE_FONT = ImageFont.truetype(_ttf, 26)
+        _SCALE_FONT_LABEL = ImageFont.truetype(_ttf, 24)
+    except Exception:
+        _SCALE_FONT = _LEGEND_FONT
+        _SCALE_FONT_LABEL = _LEGEND_FONT
 _LEGEND_MEASURE_DRAW = ImageDraw.Draw(Image.new("RGB", (1, 1)))
 
 
@@ -150,11 +179,11 @@ def _compose_overlay(b_mode_uint8, organ_ids, palette, alpha=0.5):
 
 def _render_legend_bottom(width, names, palette):
     """Multi-row legend strip sized to a given image width."""
-    swatch = 12
-    inner_gap = 4
-    entry_gap = 12
-    row_h = 18
-    pad = 6
+    swatch = 18
+    inner_gap = 6
+    entry_gap = 16
+    row_h = 30
+    pad = 8
 
     entry_widths = [
         swatch + inner_gap + _measure_text(name)[0] + entry_gap
@@ -187,12 +216,12 @@ def _render_legend_bottom(width, names, palette):
     return img
 
 
-def _render_legend_right(height, names, palette, width=150):
-    """Vertical legend strip of fixed width (default 150 px)."""
-    swatch = 12
-    inner_gap = 6
-    row_h = 18
-    pad = 6
+def _render_legend_right(height, names, palette, width=190):
+    """Vertical legend strip of fixed width (default 190 px)."""
+    swatch = 18
+    inner_gap = 8
+    row_h = 30
+    pad = 8
     img = Image.new("RGB", (width, height), (255, 255, 255))
     draw = ImageDraw.Draw(img)
     y = pad
@@ -251,40 +280,51 @@ def _depth_to_pixel_y(d_mm, cone_h_px, t_far_mm, near_mm, sector_deg):
 
 
 def _render_depth_scale_left(cone_h_px, total_h_px, t_far_mm, near_mm, sector_deg,
-                             width=44):
-    """Vertical cm-tick strip aligned with the cone's center-column depth axis.
+                             width=88):
+    """Depth scale strip, left of the cone.
 
-    White ticks/labels on a black background, matching the cone's outside-FOV color.
+    Layout (left -> right):
+      [ vertical "Distance (in cm)" label, centered ][ tick numbers ][ ticks ]
+
+    All glyphs are pure white Calibri Bold so they pop on black.
     """
     img = Image.new("RGB", (width, total_h_px), (0, 0, 0))
     draw = ImageDraw.Draw(img)
 
-    # Right-edge baseline (touches the image's left edge once pasted).
+    # Baseline along the cone (right edge of the strip).
     draw.line([(width - 1, 0), (width - 1, cone_h_px - 1)],
               fill=(255, 255, 255), width=1)
 
-    t_far_cm = int(t_far_mm // 10)  # number of full cm marks (e.g. 18 for 180 mm)
+    # Tick lines + tick numbers
+    t_far_cm = int(t_far_mm // 10)
     for cm in range(0, t_far_cm + 1):
         y = _depth_to_pixel_y(cm * 10.0, cone_h_px, t_far_mm, near_mm, sector_deg)
         if not (0 <= y < cone_h_px):
             continue
-        # Major tick every 5 cm; minor every 1 cm.
         major = (cm % 5 == 0)
-        tick_len = 12 if major else 6
-        line_w = 2 if major else 1
+        tick_len = 16 if major else 8
+        line_w = 3 if major else 1
         draw.line([(width - 1 - tick_len, y), (width - 1, y)],
                   fill=(255, 255, 255), width=line_w)
         if major:
             label = str(cm)
-            tw, th = _measure_text(label)
-            # Right-justified label, vertically centered on the tick.
-            tx = max(2, width - 1 - tick_len - 2 - tw)
+            bbox = draw.textbbox((0, 0), label, font=_SCALE_FONT)
+            tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+            tx = max(30, width - 1 - tick_len - 4 - tw)
             ty = max(0, min(cone_h_px - th - 1, y - th // 2))
-            draw.text((tx, ty), label, fill=(255, 255, 255), font=_LEGEND_FONT)
+            draw.text((tx, ty), label, fill=(255, 255, 255), font=_SCALE_FONT)
 
-    # Units label sits in the legend strip area below the cone.
-    if total_h_px > cone_h_px + 4:
-        draw.text((4, cone_h_px + 4), "cm", fill=(200, 200, 200), font=_LEGEND_FONT)
+    # Vertical "Distance (in cm)" label, centered along the strip
+    label_text = "Distance (in cm)"
+    bbox = draw.textbbox((0, 0), label_text, font=_SCALE_FONT_LABEL)
+    lw, lh = bbox[2] - bbox[0], bbox[3] - bbox[1]
+    tmp = Image.new("RGB", (lw + 8, lh + 10), (0, 0, 0))
+    tdraw = ImageDraw.Draw(tmp)
+    tdraw.text((4, 4), label_text, fill=(255, 255, 255), font=_SCALE_FONT_LABEL)
+    tmp = tmp.rotate(90, expand=True)  # bottom-to-top reading
+    paste_x = 2
+    paste_y = max(0, (cone_h_px - tmp.height) // 2)
+    img.paste(tmp, (paste_x, paste_y))
     return img
 
 
