@@ -137,7 +137,7 @@ except (IOError, OSError):
 # Depth-scale fonts: Calibri Bold copied into /workspace/i4h-sim/ alongside
 # the bind-mounted source. Falls through to matplotlib's bundled DejaVu Bold,
 # then to the PIL bitmap default — never fails import.
-_CAL_BOLD = "/workspace/i4h-sim/calibrib.ttf"
+_CAL_BOLD = "/workspace/i4h-sim/fonts/calibrib.ttf"
 try:
     _SCALE_FONT = ImageFont.truetype(_CAL_BOLD, 26)        # tick numbers
     _SCALE_FONT_LABEL = ImageFont.truetype(_CAL_BOLD, 24)  # axis label
