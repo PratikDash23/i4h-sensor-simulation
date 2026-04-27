@@ -282,6 +282,12 @@ sim_params.buffer_size = 4096
 sim_params.t_far = 180.0
 sim_params.enable_cuda_timing = True
 sim_params.median_clip_filter = False
+# Speed-of-sound–aware echo placement. Default OFF preserves NVIDIA's original
+# geometric-binning behaviour (image lines up perfectly with mesh geometry).
+# Toggle ON via the UI checkbox to reproduce real-scanner SoS aberration.
+# See `simulated_US/tutorial/sos_aware_echo_placement.md` for the full design.
+sim_params.sos_aware = False
+sim_params.assumed_sos = 1540.0  # m/s — the scanner's TOF→displayed-depth assumption
 
 # Render-time toggle: when False, /simulate returns the plain grayscale B-mode
 # without the organ color overlay or legend. Not part of the C++ SimParams since
@@ -331,6 +337,8 @@ def get_sim_params():
         "overlay_alpha": overlay_alpha,
         "min_db": min_db,
         "max_db": max_db,
+        "sos_aware": sim_params.sos_aware,
+        "assumed_sos": sim_params.assumed_sos,
     }
 
 
@@ -365,6 +373,18 @@ def set_sim_params():
         if "max_db" in params:
             max_db = float(params["max_db"])
 
+        # SoS-aware echo placement (see SimParams.sos_aware in
+        # raytracing_ultrasound_simulator.hpp). Toggling at runtime is safe — the
+        # next call to simulate() will copy the updated SimParams into the OptiX
+        # `Params` struct via raytracing_ultrasound_simulator.cpp. No rebuild needed.
+        if "sos_aware" in params:
+            sim_params.sos_aware = bool(params["sos_aware"])
+
+        if "assumed_sos" in params:
+            # Clamp to a physically sensible band; UI slider already enforces this
+            # but we don't want a bad request to push a nonsense value into OptiX.
+            sim_params.assumed_sos = float(np.clip(params["assumed_sos"], 1300.0, 1700.0))
+
         return {
             "status": "success",
             "params": {
@@ -376,6 +396,8 @@ def set_sim_params():
                 "overlay_alpha": overlay_alpha,
                 "min_db": min_db,
                 "max_db": max_db,
+                "sos_aware": sim_params.sos_aware,
+                "assumed_sos": sim_params.assumed_sos,
             }
         }
     except Exception as e:

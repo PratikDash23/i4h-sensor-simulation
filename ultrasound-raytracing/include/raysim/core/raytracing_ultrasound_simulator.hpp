@@ -55,6 +55,18 @@ class RaytracingUltrasoundSimulator {
     bool enable_cuda_timing = false;            // Print timing of CUDA operations
     bool write_debug_images = false;            // Write debug images to `debug_images` directory
     float contact_epsilon = 0.0f;               // Maximum distance for element activation [mm]
+    // -- Speed-of-sound–aware echo placement -----------------------------------------------------
+    // Default `false` preserves the legacy NVIDIA behaviour (echoes binned by *geometric* ray
+    // distance — image lines up perfectly with mesh geometry, ideal for ML ground-truth alignment).
+    // Setting `true` makes the simulator bin echoes by *displayed depth* derived from time-of-flight
+    // through the actual per-material speeds of sound, then converted back to displayed depth via
+    // `assumed_sos`. This reproduces the speed-of-sound aberration a real B-mode scanner shows
+    // when the actual tissue SoS differs from the scanner's TOF→depth assumption (~1540 m/s):
+    // fat-rich paths show echoes ~6% deeper than truth, bone collapses echoes toward the surface,
+    // etc. See `simulated_US/tutorial/sos_aware_echo_placement.md` for the full design + math.
+    bool sos_aware = false;
+    float assumed_sos = 1540.f;                 // m/s; the scanner's TOF→displayed-depth assumption
+    // --------------------------------------------------------------------------------------------
   };
 
   /// Simulation results

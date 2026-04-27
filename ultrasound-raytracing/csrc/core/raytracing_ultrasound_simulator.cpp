@@ -302,6 +302,10 @@ RaytracingUltrasoundSimulator::SimResult RaytracingUltrasoundSimulator::simulate
     params.handle = world_->get_gas_handle();
     params.source_frequency = probe->get_frequency();
     params.contact_epsilon = sim_params.contact_epsilon;
+    // SoS-aware echo placement (see SimParams for full description). Forwarded to the OptiX
+    // kernel so per-launch toggles take effect without rebuilding the pipeline.
+    params.sos_aware = sim_params.sos_aware;
+    params.assumed_sos = sim_params.assumed_sos;
 
     pipeline_params_.upload(&params, sim_params.stream);
 

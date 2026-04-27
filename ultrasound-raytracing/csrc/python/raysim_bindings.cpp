@@ -411,6 +411,16 @@ Elements steer beams electronically to create a sector image from a small footpr
       .def_readwrite("contact_epsilon",
                      &raysim::RaytracingUltrasoundSimulator::SimParams::contact_epsilon,
                      "Maximum distance for element activation [mm]")
+      // SoS-aware echo placement (see SimParams docstring in raytracing_ultrasound_simulator.hpp).
+      // Default OFF preserves NVIDIA's original geometric-binning behaviour.
+      .def_readwrite("sos_aware",
+                     &raysim::RaytracingUltrasoundSimulator::SimParams::sos_aware,
+                     "If true, bin echoes by displayed depth derived from time-of-flight × "
+                     "assumed_sos (reproduces real-scanner SoS aberration). Default false.")
+      .def_readwrite("assumed_sos",
+                     &raysim::RaytracingUltrasoundSimulator::SimParams::assumed_sos,
+                     "Speed of sound (m/s) the simulated scanner assumes when converting TOF "
+                     "to displayed depth. Conventionally 1540 m/s. Only used if sos_aware=true.")
       .def_property(
           "b_mode_size",
           [](raysim::RaytracingUltrasoundSimulator::SimParams& self) {

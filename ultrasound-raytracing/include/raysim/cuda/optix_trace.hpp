@@ -40,6 +40,18 @@ struct Params {
   OptixTraversableHandle handle;
   float source_frequency;
   float contact_epsilon;
+  // -- Speed-of-sound–aware echo placement -------------------------------------------------------
+  // When `sos_aware == false` (default), echoes are binned by *geometric* ray distance — the
+  // legacy/NVIDIA behaviour, perfectly aligned with mesh geometry, ideal for ML ground-truth.
+  // When `sos_aware == true`, echoes are binned by *displayed depth* derived from time-of-flight:
+  //     displayed_depth_mm = assumed_sos[m/s] * tof[s] / 2
+  //                        = assumed_sos      * tof_us * 5e-4
+  // This reproduces the speed-of-sound aberration a real B-mode scanner shows when the actual
+  // tissue speed of sound differs from `assumed_sos` (the scanner's hardcoded TOF→depth assumption,
+  // conventionally 1540 m/s).
+  bool sos_aware;
+  float assumed_sos;  // m/s
+  // ----------------------------------------------------------------------------------------------
 };
 
 struct RayGenData {
@@ -63,7 +75,17 @@ struct HitGroupData {
 struct Payload {
   float intensity;
   uint32_t depth;
+  // Geometric path length accumulated by all ancestor segments [mm]. Used by:
+  //   (a) Beer-Lambert attenuation (depends on physical distance through tissue), and
+  //   (b) the OptiX `tmax` cap when spawning child rays (the scene is bounded in mm,
+  //       not in TOF — see `params.t_far - ray.t_ancestors` in optix_trace.cu).
+  // Always populated, irrespective of `params.sos_aware`.
   float t_ancestors;
+  // Time of flight accumulated by all ancestor segments [microseconds]. Only meaningful
+  // when `params.sos_aware == true` — used to compute the displayed-depth bin via
+  //     displayed_depth_mm = params.assumed_sos * tof_ancestors_us * 5e-4
+  // Each segment contributes (segment_distance_mm * 1e-3 / segment_c_mps) * 1e6 us.
+  float tof_ancestors;
   // use 16 bit for object and material ID to safe space
   uint16_t current_obj_id;
   uint16_t outter_obj_id;

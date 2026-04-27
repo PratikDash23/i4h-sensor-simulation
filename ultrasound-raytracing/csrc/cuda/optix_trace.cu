@@ -32,12 +32,16 @@ __constant__ Params params;
 
 static __forceinline__ __device__ Payload get_payload() {
   Payload payload;
-  static_assert(sizeof(Payload) / sizeof(uint32_t) == 5);
+  // Payload grew from 5→6 uint32 words when SoS-aware echo placement added `tof_ancestors`
+  // (see optix_trace.hpp). Every optixTrace site below + the pipeline's auto-derived
+  // `numPayloadValues` (optix_helper.cpp:100) must agree on this count.
+  static_assert(sizeof(Payload) / sizeof(uint32_t) == 6);
   reinterpret_cast<uint32_t*>(&payload)[0] = optixGetPayload_0();
   reinterpret_cast<uint32_t*>(&payload)[1] = optixGetPayload_1();
   reinterpret_cast<uint32_t*>(&payload)[2] = optixGetPayload_2();
   reinterpret_cast<uint32_t*>(&payload)[3] = optixGetPayload_3();
   reinterpret_cast<uint32_t*>(&payload)[4] = optixGetPayload_4();
+  reinterpret_cast<uint32_t*>(&payload)[5] = optixGetPayload_5();
   return payload;
 }
 
@@ -54,12 +58,55 @@ static __device__ float get_scattering_value(float3 pos, const Material* materia
 }
 
 /**
+ * Return the scanline-buffer bin index for an echo at *geometric* ray distance `t` [mm].
+ *
+ * This is the legacy NVIDIA placement: bin = (t / t_far) * (buffer_size - 1).
+ * Used unconditionally when `params.sos_aware == false`. With SoS-aware mode on, the bin
+ * is computed by `offset_from_tof` instead (below) and this helper is bypassed.
+ *
  * @return offset to intensity buffer at ray distance t
  */
 static __device__ uint32_t get_intensity_offset(float t) {
   uint32_t offset = uint32_t((t / params.t_far) * (params.buffer_size - 1) + 0.5f);
   assert(offset < params.buffer_size);
   return offset;
+}
+
+/**
+ * Return the scanline-buffer bin index for an echo at accumulated time-of-flight `tof_us` [μs].
+ *
+ * Mirrors what a real B-mode scanner does: it has no access to ground-truth geometry, only to
+ * arrival times, so it converts time → "displayed depth" by assuming ONE speed of sound for
+ * everything (`params.assumed_sos`, conventionally 1540 m/s):
+ *
+ *     displayed_depth_mm = assumed_sos[m/s] * tof[s] / 2 * 1000
+ *                        = assumed_sos      * tof_us  * 5e-4
+ *                        (the 0.5 is round-trip → one-way; tof_us already counts one-way TOF)
+ *
+ * Slow tissue (e.g. fat at c=1450) can push `displayed_depth_mm` past `t_far` for the deepest
+ * echoes — that is the correct displayed-depth math, NOT a bug, so we clip to the last bin
+ * rather than asserting (assert would fire on perfectly valid inputs).
+ *
+ * Only used when `params.sos_aware == true`.
+ */
+static __device__ uint32_t offset_from_tof(float tof_us) {
+  const float displayed_mm = params.assumed_sos * tof_us * 5e-4f;
+  if (displayed_mm >= params.t_far) { return params.buffer_size - 1; }
+  return uint32_t((displayed_mm / params.t_far) * (params.buffer_size - 1) + 0.5f);
+}
+
+/**
+ * Convert a geometric distance increment to an additional time-of-flight [μs].
+ *
+ *     tof_us = (distance_mm * 1e-3 / c_mps) * 1e6
+ *            = distance_mm / c_mps * 1e3
+ *
+ * Pulled into a helper to keep the unit conversions in exactly one place — every callsite
+ * that adds to `tof_ancestors` should go through this so we never accidentally use the
+ * wrong unit (mm vs cm, m/s vs mm/μs, etc).
+ */
+static __device__ float distance_to_tof_us(float distance_mm, float c_mps) {
+  return distance_mm * 1e3f / c_mps;
 }
 
 /// Calculate intensity using Beer-Lambert Law
@@ -75,11 +122,31 @@ static __device__ float get_intensity_at_distance(float distance, float medium_a
 }
 
 /**
- * Sample intensities
+ * Sample intensities along the current ray segment, depositing speckle (and per-pixel
+ * organ/material labels) into the scanline buffer.
+ *
+ * Two binning modes:
+ *
+ *   `params.sos_aware == false` (legacy): bin by *geometric distance*.
+ *     - One `base_offset = (t_ancestors + t_min) → bin` computed once.
+ *     - Step n lands at `base_offset + n` since the loop's `t_step` is sized so that
+ *       one step exactly equals one bin width in the geometric metric.
+ *
+ *   `params.sos_aware == true`: bin by *displayed depth* derived from time-of-flight.
+ *     - One `base_tof_us = tof_ancestors + tof(t_min in this material)` computed once.
+ *     - Each step advances TOF by the constant `tof_step_us = tof(t_step in this material)`,
+ *       and the bin is `offset_from_tof(base_tof_us + step * tof_step_us)`.
+ *     - We do NOT pre-advance the buffer pointer because consecutive TOF steps generally
+ *       map to non-consecutive bins (the bin width varies with the local SoS).
+ *
+ * The Beer-Lambert intensity calculation is *unchanged* — it depends on physical distance
+ * through the medium, not on the binning convention. Only *where* the echo is written moves.
  *
  * @param origin ray origin in world space
  * @param dir ray direction in world space
- * @param t_ancestors accumulated ray length from prior segments [mm]
+ * @param t_ancestors accumulated geometric ray length from prior segments [mm]
+ * @param tof_ancestors accumulated time-of-flight from prior segments [μs] (only consulted
+ *                      when `params.sos_aware == true`; pass 0 in legacy mode)
  * @param t_min start of the current segment along the ray [mm]
  * @param t_max end of the current segment along the ray [mm]
  * @param intensity ray intensity carried into this segment
@@ -88,15 +155,16 @@ static __device__ float get_intensity_at_distance(float distance, float medium_a
  *                 into every depth bin this loop touches so speckle pixels
  *                 carry a label
  * @param material_id current material id; stamped into the parallel buffer
- * @param intensities scanline scattering buffer (already advanced to this
- *                    line's base; this fn applies the t_ancestors+t_min offset)
+ * @param intensities scanline scattering buffer (NOT pre-advanced — this fn writes via
+ *                    `intensities[bin]` so the same code works for both binning modes)
  * @param organ_ids_out parallel uint32 buffer for organ labels (same layout
  *                      as `intensities`). Boundary writes from the caller
  *                      naturally overwrite the boundary's bin afterwards.
  * @param material_ids_out parallel uint32 buffer for material labels
  */
-static __device__ void sample_intensities(float3 origin, float3 dir, float t_ancestors, float t_min,
-                                          float t_max, float intensity, const Material* material,
+static __device__ void sample_intensities(float3 origin, float3 dir, float t_ancestors,
+                                          float tof_ancestors, float t_min, float t_max,
+                                          float intensity, const Material* material,
                                           uint32_t organ_id, uint32_t material_id,
                                           float* intensities, uint32_t* organ_ids_out,
                                           uint32_t* material_ids_out) {
@@ -110,26 +178,42 @@ static __device__ void sample_intensities(float3 origin, float3 dir, float t_anc
   const float t_step = (t_max - t_min) / steps;
   const float3 start = origin + t_min * dir;
 
-  const uint32_t base_offset = get_intensity_offset(t_ancestors + t_min);
-  intensities += base_offset;
-  organ_ids_out += base_offset;
-  material_ids_out += base_offset;
+  // Pre-compute per-mode binning constants once outside the loop.
+  // Legacy (geometric): bin index of the segment's first sample.
+  const uint32_t base_offset_geom = get_intensity_offset(t_ancestors + t_min);
+  // SoS-aware (TOF): TOF at the segment's first sample, plus per-step TOF increment.
+  // c_mps is constant within a single material/segment, so both are loop invariants.
+  const float c_mps = material->speed_of_sound_;
+  const float base_tof_us = tof_ancestors + distance_to_tof_us(t_min, c_mps);
+  const float tof_step_us = distance_to_tof_us(t_step, c_mps);
+
+  // Resolve a step index → scanline bin index. One branch per step is cheap relative
+  // to the texture sample / pow that follow; clarity > micro-perf here.
+  auto bin_for = [&] __device__ (uint32_t step) -> uint32_t {
+    if (params.sos_aware) {
+      return offset_from_tof(base_tof_us + step * tof_step_us);
+    }
+    return base_offset_geom + step;
+  };
 
   if (skip_scatter) {
     for (uint32_t step = 0; step < steps; ++step) {
-      organ_ids_out[step] = organ_id;
-      material_ids_out[step] = material_id;
+      const uint32_t bin = bin_for(step);
+      organ_ids_out[bin] = organ_id;
+      material_ids_out[bin] = material_id;
     }
     return;
   }
 
   for (uint32_t step = 0; step < steps; ++step) {
-    const float distance = (step * t_step);
+    const float distance = (step * t_step);  // geometric mm into this segment
     const float3 pos = start + distance * dir;
-    intensities[step] += get_scattering_value(pos, material) * intensity *
-                         get_intensity_at_distance(distance, material->attenuation_);
-    organ_ids_out[step] = organ_id;
-    material_ids_out[step] = material_id;
+    const uint32_t bin = bin_for(step);
+    // Beer-Lambert is distance-based (physics doesn't change with binning convention).
+    intensities[bin] += get_scattering_value(pos, material) * intensity *
+                        get_intensity_at_distance(distance, material->attenuation_);
+    organ_ids_out[bin] = organ_id;
+    material_ids_out[bin] = material_id;
   }
 }
 
@@ -377,6 +461,9 @@ extern "C" __global__ void __raygen__rg() {
   ray.current_obj_id = static_cast<uint16_t>(-1);
   ray.outter_obj_id = static_cast<uint16_t>(-1);
 
+  // `Payload ray{}` zero-initialises everything, so ray.t_ancestors and ray.tof_ancestors
+  // (the new SoS-aware accumulator) are both implicitly 0 for primary rays. No explicit
+  // init line needed, but mentioning here so the assumption is auditable.
   optixTrace(params.handle,
              origin,
              direction,
@@ -392,8 +479,9 @@ extern "C" __global__ void __raygen__rg() {
              reinterpret_cast<uint32_t*>(&ray)[1],
              reinterpret_cast<uint32_t*>(&ray)[2],
              reinterpret_cast<uint32_t*>(&ray)[3],
-             reinterpret_cast<uint32_t*>(&ray)[4]);
-  static_assert(sizeof(Payload) / sizeof(uint32_t) == 5);
+             reinterpret_cast<uint32_t*>(&ray)[4],
+             reinterpret_cast<uint32_t*>(&ray)[5]);
+  static_assert(sizeof(Payload) / sizeof(uint32_t) == 6);
 }
 
 extern "C" __global__ void __miss__ms() {
@@ -412,6 +500,7 @@ extern "C" __global__ void __miss__ms() {
       optixGetWorldRayOrigin(),
       optixGetWorldRayDirection(),
       ray.t_ancestors,
+      ray.tof_ancestors,  // SoS-aware TOF accumulator (ignored when params.sos_aware == false)
       optixGetRayTmin(),
       optixGetRayTmax(),
       ray.intensity,
@@ -450,6 +539,7 @@ static __device__ void closest_hit() {
   sample_intensities(ray_orig,
                      ray_dir,
                      ray.t_ancestors,
+                     ray.tof_ancestors,  // SoS-aware TOF accumulator (no-op when sos_aware == false)
                      t_min,
                      t,
                      ray.intensity,
@@ -504,7 +594,16 @@ static __device__ void closest_hit() {
                                                                  ray_dir,
                                                                  next_material->specularity_) *
                                     ray_coherence_attenuation;
-  const uint32_t boundary_offset = get_intensity_offset(ray.t_ancestors + t);
+  // Bin the boundary echo. In legacy (geometric) mode this is just `t_ancestors + t` mm
+  // through `get_intensity_offset`. In SoS-aware mode we instead place it at the displayed
+  // depth implied by the total time-of-flight up to the hit point — the parent's
+  // `tof_ancestors` plus the time spent crossing this segment at the current material's SoS.
+  // This is the headline behaviour change: where the boundary echo lands shifts when actual
+  // tissue SoS differs from `params.assumed_sos`.
+  const uint32_t boundary_offset = params.sos_aware
+      ? offset_from_tof(ray.tof_ancestors
+                        + distance_to_tof_us(t, current_material->speed_of_sound_))
+      : get_intensity_offset(ray.t_ancestors + t);
   scanline[boundary_offset] = 2.f * specular_reflection;
   // Boundary pixel is attributed to the organ/material the ray is refracting INTO
   // (the bright echo comes from crossing into that medium). This overwrites
@@ -530,6 +629,12 @@ static __device__ void closest_hit() {
     reflected_ray.intensity = reflected_intensity;
     reflected_ray.depth = ray.depth + 1;
     reflected_ray.t_ancestors = ray.t_ancestors + t;
+    // SoS-aware TOF accumulator: parent's TOF plus the time spent crossing this segment
+    // at the current material's speed of sound (we are reflecting back, so we have not yet
+    // entered `next_material`). Always populated — when `params.sos_aware == false` it costs
+    // a few extra arithmetic ops but is otherwise unused. tmax stays geometric (see below).
+    reflected_ray.tof_ancestors =
+        ray.tof_ancestors + distance_to_tof_us(t, current_material->speed_of_sound_);
     reflected_ray.current_material_id = ray.current_material_id;
     reflected_ray.outter_material_id = ray.outter_material_id;
     reflected_ray.current_obj_id = ray.current_obj_id;
@@ -538,11 +643,16 @@ static __device__ void closest_hit() {
     // Secondary rays along the surface normal should use the generated front point as origin, while
     // rays pointing away from the normal should use the back point as origin.
     const float3 start = (dot(reflected_dir, wld_norm) > 0.f) ? front_start : back_start;
+    // tmax is the geometric reach into the scene that OptiX should search for the next mesh
+    // intersection — a property of the scene volume in mm, NOT of the displayed-depth axis.
+    // It must stay geometric even in SoS-aware mode; using a TOF-derived bound here would
+    // truncate rays through bone (display fast → "out of volume" early but geometrically
+    // still inside) and over-extend rays through fat. See sos_aware_echo_placement.md.
     optixTrace(params.handle,
                start,
                reflected_dir,
                0.f,                                       // tmin
-               params.t_far - reflected_ray.t_ancestors,  // tmax
+               params.t_far - reflected_ray.t_ancestors,  // tmax (geometric, intentional)
                0.f,                                       // rayTime
                OptixVisibilityMask(1),
                OPTIX_RAY_FLAG_NONE,
@@ -553,8 +663,9 @@ static __device__ void closest_hit() {
                reinterpret_cast<uint32_t*>(&reflected_ray)[1],
                reinterpret_cast<uint32_t*>(&reflected_ray)[2],
                reinterpret_cast<uint32_t*>(&reflected_ray)[3],
-               reinterpret_cast<uint32_t*>(&reflected_ray)[4]);
-    static_assert(sizeof(Payload) / sizeof(uint32_t) == 5);
+               reinterpret_cast<uint32_t*>(&reflected_ray)[4],
+               reinterpret_cast<uint32_t*>(&reflected_ray)[5]);
+    static_assert(sizeof(Payload) / sizeof(uint32_t) == 6);
   }
 
   // Create refracted ray
@@ -563,6 +674,12 @@ static __device__ void closest_hit() {
     refracted_ray.intensity = refracted_intensity;
     refracted_ray.depth = ray.depth + 1;
     refracted_ray.t_ancestors = ray.t_ancestors + t;
+    // SoS-aware TOF accumulator: time spent traversing the parent's `current_material`
+    // (which the ray was IN for the segment of length `t` ending at this boundary). The
+    // child ray will then propagate through `next_material` from here on. Always populated
+    // for the same reasons as the reflected case.
+    refracted_ray.tof_ancestors =
+        ray.tof_ancestors + distance_to_tof_us(t, current_material->speed_of_sound_);
     refracted_ray.current_material_id = next_material_id;
     refracted_ray.outter_material_id = ray.current_material_id;
     refracted_ray.current_obj_id = next_obj_id;
@@ -571,11 +688,12 @@ static __device__ void closest_hit() {
     // Secondary rays along the surface normal should use the generated front point as origin, while
     // rays pointing away from the normal should use the back point as origin.
     const float3 start = (dot(refracted_dir, wld_norm) > 0.f) ? front_start : back_start;
+    // tmax stays geometric — see the comment on the reflected branch above for the rationale.
     optixTrace(params.handle,
                start,
                refracted_dir,
                0.f,                                       // tmin
-               params.t_far - refracted_ray.t_ancestors,  // tmax
+               params.t_far - refracted_ray.t_ancestors,  // tmax (geometric, intentional)
                0.f,                                       // rayTime
                OptixVisibilityMask(1),
                OPTIX_RAY_FLAG_NONE,
@@ -586,8 +704,9 @@ static __device__ void closest_hit() {
                reinterpret_cast<uint32_t*>(&refracted_ray)[1],
                reinterpret_cast<uint32_t*>(&refracted_ray)[2],
                reinterpret_cast<uint32_t*>(&refracted_ray)[3],
-               reinterpret_cast<uint32_t*>(&refracted_ray)[4]);
-    static_assert(sizeof(Payload) / sizeof(uint32_t) == 5);
+               reinterpret_cast<uint32_t*>(&refracted_ray)[4],
+               reinterpret_cast<uint32_t*>(&refracted_ray)[5]);
+    static_assert(sizeof(Payload) / sizeof(uint32_t) == 6);
   }
 }
 
