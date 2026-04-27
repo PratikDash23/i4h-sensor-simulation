@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import io
+import math
 import os
 import sys
 
@@ -223,6 +224,81 @@ def _attach_legend(image_rgb, names, palette, layout="bottom"):
     return canvas
 
 
+# ---------------------------------------------------------------------------
+# Depth scale (vertical cm strip on the LEFT of the cone)
+# ---------------------------------------------------------------------------
+# The mapping below mirrors the scan-converter math in
+# csrc/cuda/cuda_algorithms.cu :: scan_convert_curvilinear_kernel.
+# For a curvilinear probe with inner radius `near_mm` and full sector angle a:
+#     far_mm   = t_far_mm + near_mm           (outer radius of the sector)
+#     offset_z = cos(a/2) * (near_mm / far_mm)
+# A pixel on the image's center column (x=0) at output-pixel y_idx in [0, H-1]
+# maps to a normalized radial coord:
+#     coord_y(y_idx) = offset_z + (y_idx / H) * (1 - offset_z)
+# and to a depth-from-probe-surface in mm:
+#     depth_mm = coord_y * far_mm - near_mm
+# Inverting: pixel y for a target depth d_mm:
+#     y_idx = ((d_mm + near_mm) / far_mm - offset_z) / (1 - offset_z) * H
+# When near_mm == 0 (linear / phased), this reduces to a linear
+# y_idx = d_mm / t_far_mm * H.
+def _depth_to_pixel_y(d_mm, cone_h_px, t_far_mm, near_mm, sector_deg):
+    if near_mm <= 0.0:
+        return int(round(d_mm / t_far_mm * cone_h_px))
+    far_mm = t_far_mm + near_mm
+    offset_z = math.cos(math.radians(sector_deg) / 2.0) * (near_mm / far_mm)
+    coord_y = (d_mm + near_mm) / far_mm
+    return int(round((coord_y - offset_z) / (1.0 - offset_z) * cone_h_px))
+
+
+def _render_depth_scale_left(cone_h_px, total_h_px, t_far_mm, near_mm, sector_deg,
+                             width=44):
+    """Vertical cm-tick strip aligned with the cone's center-column depth axis.
+
+    White ticks/labels on a black background, matching the cone's outside-FOV color.
+    """
+    img = Image.new("RGB", (width, total_h_px), (0, 0, 0))
+    draw = ImageDraw.Draw(img)
+
+    # Right-edge baseline (touches the image's left edge once pasted).
+    draw.line([(width - 1, 0), (width - 1, cone_h_px - 1)],
+              fill=(255, 255, 255), width=1)
+
+    t_far_cm = int(t_far_mm // 10)  # number of full cm marks (e.g. 18 for 180 mm)
+    for cm in range(0, t_far_cm + 1):
+        y = _depth_to_pixel_y(cm * 10.0, cone_h_px, t_far_mm, near_mm, sector_deg)
+        if not (0 <= y < cone_h_px):
+            continue
+        # Major tick every 5 cm; minor every 1 cm.
+        major = (cm % 5 == 0)
+        tick_len = 12 if major else 6
+        line_w = 2 if major else 1
+        draw.line([(width - 1 - tick_len, y), (width - 1, y)],
+                  fill=(255, 255, 255), width=line_w)
+        if major:
+            label = str(cm)
+            tw, th = _measure_text(label)
+            # Right-justified label, vertically centered on the tick.
+            tx = max(2, width - 1 - tick_len - 2 - tw)
+            ty = max(0, min(cone_h_px - th - 1, y - th // 2))
+            draw.text((tx, ty), label, fill=(255, 255, 255), font=_LEGEND_FONT)
+
+    # Units label sits in the legend strip area below the cone.
+    if total_h_px > cone_h_px + 4:
+        draw.text((4, cone_h_px + 4), "cm", fill=(200, 200, 200), font=_LEGEND_FONT)
+    return img
+
+
+def _attach_depth_scale(canvas, cone_h_px, t_far_mm, near_mm, sector_deg):
+    """Prepend the depth-scale strip to the left of an already-composed canvas."""
+    scale = _render_depth_scale_left(cone_h_px, canvas.height, t_far_mm,
+                                     near_mm, sector_deg)
+    out = Image.new("RGB", (scale.width + canvas.width, canvas.height),
+                    (255, 255, 255))
+    out.paste(scale, (0, 0))
+    out.paste(canvas, (scale.width, 0))
+    return out
+
+
 # Initial poses for different probe types
 initial_poses = {
     "curvilinear": rs.Pose(
@@ -267,6 +343,17 @@ probes = {
         elevational_height=5.0,  # probe elevational aperture height in mm
         num_el_samples=10,  # number of samples in elevational direction
     ),
+}
+
+# Probe geometry mirror (Python doesn't have getters for radius / sector_angle).
+# Used by the depth-scale renderer to compute the depth-to-pixel mapping that
+# matches the scan-converter (csrc/cuda/cuda_algorithms.cu :: scan_convert_*).
+# 'near_mm'   : 0 for linear/phased; probe radius for curvilinear.
+# 'sector_deg': 0 for linear; sector full angle in degrees for curvilinear/phased.
+PROBE_GEOM = {
+    "curvilinear": {"near_mm": 45.0, "sector_deg": 73.0},
+    "linear":      {"near_mm":  0.0, "sector_deg":  0.0},
+    "phased":      {"near_mm":  0.0, "sector_deg": 90.0},
 }
 
 # Current active probe
@@ -333,6 +420,7 @@ def get_sim_params():
         "enable_cuda_timing": sim_params.enable_cuda_timing,
         "write_debug_images": sim_params.write_debug_images,
         "contact_epsilon": sim_params.contact_epsilon,
+        "t_far": sim_params.t_far,
         "show_organ_overlay": show_organ_overlay,
         "overlay_alpha": overlay_alpha,
         "min_db": min_db,
@@ -360,6 +448,9 @@ def set_sim_params():
 
         if "contact_epsilon" in params:
             sim_params.contact_epsilon = float(params["contact_epsilon"])
+        if "t_far" in params:
+            # Clamp to [50, 300] mm as a defence-in-depth check beyond the UI input.
+            sim_params.t_far = float(np.clip(float(params["t_far"]), 50.0, 300.0))
 
         if "show_organ_overlay" in params:
             show_organ_overlay = bool(params["show_organ_overlay"])
@@ -392,6 +483,7 @@ def set_sim_params():
                 "enable_cuda_timing": sim_params.enable_cuda_timing,
                 "write_debug_images": sim_params.write_debug_images,
                 "contact_epsilon": sim_params.contact_epsilon,
+        "t_far": sim_params.t_far,
                 "show_organ_overlay": show_organ_overlay,
                 "overlay_alpha": overlay_alpha,
                 "min_db": min_db,
@@ -461,12 +553,19 @@ def simulate():
     # Convert to 8-bit grayscale. With the overlay enabled, alpha-blend the
     # organ map on top and append the legend; otherwise return plain grayscale.
     img_uint8 = (normalized_image * 255).astype(np.uint8)
+    cone_h_px = img_uint8.shape[0]
     if show_organ_overlay:
         overlay_rgb = _compose_overlay(img_uint8, organ_ids, organ_palette, alpha=overlay_alpha)
         composite = _attach_legend(overlay_rgb, organ_names, organ_palette, layout=layout)
     else:
         gray_rgb = np.repeat(img_uint8[:, :, None], 3, axis=2)
         composite = Image.fromarray(gray_rgb, mode="RGB")
+
+    # Vertical cm depth scale on the left, aligned to the cone's center column.
+    geom = PROBE_GEOM.get(active_probe, {"near_mm": 0.0, "sector_deg": 0.0})
+    composite = _attach_depth_scale(composite, cone_h_px,
+                                    sim_params.t_far,
+                                    geom["near_mm"], geom["sector_deg"])
 
     img_io = io.BytesIO()
     composite.save(img_io, "PNG")

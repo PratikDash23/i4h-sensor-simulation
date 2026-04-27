@@ -241,7 +241,7 @@
                                             when actual tissue SoS differs from `assumed_sos`. -->
                         <label style="display: flex; align-items: center; gap: 8px; margin: 8px 0;">
                             <input type="checkbox" id="sosAware" name="sosAware">
-                            <span>SoS-aware echo placement (TOF)</span>
+                            <span>SoS-aware echo placement (ToF)</span>
                         </label>
                         <div style="margin-top: 8px;">
                             <label for="assumedSos" style="display: block; margin-bottom: 4px;">Assumed SoS (m/s):</label>
@@ -249,6 +249,12 @@
                                 <input type="range" id="assumedSos" min="1400" max="1600" step="5" value="1540" style="flex: 1;">
                                 <span id="assumedSosValue" style="min-width: 50px; font-weight: 600;">1540</span>
                             </div>
+                        </div>
+                        <div style="margin-top: 12px;">
+                            <label for="tFar" style="display: flex; align-items: center; gap: 8px; margin: 8px 0;">
+                                <span>Max Depth (mm):</span>
+                                <input type="number" id="tFar" name="tFar" min="50" max="300" step="5" style="width: 70px;">
+                            </label>
                         </div>
                         <div style="margin-top: 12px;">
                             <label for="contactEpsilon" style="display: flex; align-items: center; gap: 8px; margin: 8px 0;">
@@ -473,6 +479,7 @@
                     document.getElementById('enableCudaTiming').checked = params.enable_cuda_timing;
                     document.getElementById('writeDebugImages').checked = params.write_debug_images;
                     document.getElementById('contactEpsilon').value = params.contact_epsilon;
+                    document.getElementById('tFar').value = params.t_far;
                     document.getElementById('showOrganOverlay').checked = params.show_organ_overlay;
                     document.getElementById('overlayAlpha').value = params.overlay_alpha;
                     document.getElementById('overlayAlphaValue').textContent = parseFloat(params.overlay_alpha).toFixed(2);
@@ -648,6 +655,10 @@
 
             document.getElementById('contactEpsilon').addEventListener('change', (e) => {
                 updateSimParams('contact_epsilon', parseFloat(e.target.value));
+            });
+
+            document.getElementById('tFar').addEventListener('change', (e) => {
+                updateSimParams('t_far', parseFloat(e.target.value));
             });
 
             document.getElementById('showOrganOverlay').addEventListener('change', (e) => {

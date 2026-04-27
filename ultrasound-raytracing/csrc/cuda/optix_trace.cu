@@ -77,11 +77,19 @@ static __device__ uint32_t get_intensity_offset(float t) {
  *
  * Mirrors what a real B-mode scanner does: it has no access to ground-truth geometry, only to
  * arrival times, so it converts time → "displayed depth" by assuming ONE speed of sound for
- * everything (`params.assumed_sos`, conventionally 1540 m/s):
+ * everything (`params.assumed_sos`, conventionally 1540 m/s).
  *
- *     displayed_depth_mm = assumed_sos[m/s] * tof[s] / 2 * 1000
- *                        = assumed_sos      * tof_us  * 5e-4
- *                        (the 0.5 is round-trip → one-way; tof_us already counts one-way TOF)
+ * The real scanner sees ROUND-TRIP TOF and halves it: d_displayed = c_assumed * t_round_trip / 2.
+ * Our `tof_ancestors` is already ONE-WAY (probe → scatter), so the /2 is already absorbed.
+ * For a scatter at one-way distance d through material c_real:
+ *     t_oneway       = d / c_real
+ *     d_displayed_m  = c_assumed * t_oneway       (matches what the scanner shows)
+ *
+ * Unit conversion (m/s, μs → mm):
+ *     displayed_mm = assumed_sos[m/s] * tof_us[μs] * 1e-6[s/μs] * 1e3[mm/m]
+ *                  = assumed_sos      * tof_us      * 1e-3
+ *
+ * Sanity check: if c_real == c_assumed, t_oneway = d/c, so displayed = c * (d/c) = d. Identity.
  *
  * Slow tissue (e.g. fat at c=1450) can push `displayed_depth_mm` past `t_far` for the deepest
  * echoes — that is the correct displayed-depth math, NOT a bug, so we clip to the last bin
@@ -90,7 +98,7 @@ static __device__ uint32_t get_intensity_offset(float t) {
  * Only used when `params.sos_aware == true`.
  */
 static __device__ uint32_t offset_from_tof(float tof_us) {
-  const float displayed_mm = params.assumed_sos * tof_us * 5e-4f;
+  const float displayed_mm = params.assumed_sos * tof_us * 1e-3f;
   if (displayed_mm >= params.t_far) { return params.buffer_size - 1; }
   return uint32_t((displayed_mm / params.t_far) * (params.buffer_size - 1) + 0.5f);
 }
@@ -187,33 +195,51 @@ static __device__ void sample_intensities(float3 origin, float3 dir, float t_anc
   const float base_tof_us = tof_ancestors + distance_to_tof_us(t_min, c_mps);
   const float tof_step_us = distance_to_tof_us(t_step, c_mps);
 
-  // Resolve a step index → scanline bin index. One branch per step is cheap relative
-  // to the texture sample / pow that follow; clarity > micro-perf here.
-  auto bin_for = [&] __device__ (uint32_t step) -> uint32_t {
-    if (params.sos_aware) {
-      return offset_from_tof(base_tof_us + step * tof_step_us);
-    }
-    return base_offset_geom + step;
-  };
+  // Resolve a step index → scanline bin index. We hoist the SoS-aware branch out of
+  // the inner loop so the loop body itself stays branch-free; the two loops below
+  // share their compute except for this one line.
+  // (Originally written as a __device__ lambda; the project does not enable
+  // nvcc --extended-lambda, so we expand the two cases inline.)
 
   if (skip_scatter) {
-    for (uint32_t step = 0; step < steps; ++step) {
-      const uint32_t bin = bin_for(step);
-      organ_ids_out[bin] = organ_id;
-      material_ids_out[bin] = material_id;
+    if (params.sos_aware) {
+      for (uint32_t step = 0; step < steps; ++step) {
+        const uint32_t bin = offset_from_tof(base_tof_us + step * tof_step_us);
+        organ_ids_out[bin] = organ_id;
+        material_ids_out[bin] = material_id;
+      }
+    } else {
+      for (uint32_t step = 0; step < steps; ++step) {
+        const uint32_t bin = base_offset_geom + step;
+        organ_ids_out[bin] = organ_id;
+        material_ids_out[bin] = material_id;
+      }
     }
     return;
   }
 
-  for (uint32_t step = 0; step < steps; ++step) {
-    const float distance = (step * t_step);  // geometric mm into this segment
-    const float3 pos = start + distance * dir;
-    const uint32_t bin = bin_for(step);
-    // Beer-Lambert is distance-based (physics doesn't change with binning convention).
-    intensities[bin] += get_scattering_value(pos, material) * intensity *
-                        get_intensity_at_distance(distance, material->attenuation_);
-    organ_ids_out[bin] = organ_id;
-    material_ids_out[bin] = material_id;
+  if (params.sos_aware) {
+    for (uint32_t step = 0; step < steps; ++step) {
+      const float distance = (step * t_step);  // geometric mm into this segment
+      const float3 pos = start + distance * dir;
+      const uint32_t bin = offset_from_tof(base_tof_us + step * tof_step_us);
+      // Beer-Lambert is distance-based (physics doesn't change with binning convention).
+      intensities[bin] += get_scattering_value(pos, material) * intensity *
+                          get_intensity_at_distance(distance, material->attenuation_);
+      organ_ids_out[bin] = organ_id;
+      material_ids_out[bin] = material_id;
+    }
+  } else {
+    for (uint32_t step = 0; step < steps; ++step) {
+      const float distance = (step * t_step);  // geometric mm into this segment
+      const float3 pos = start + distance * dir;
+      const uint32_t bin = base_offset_geom + step;
+      // Beer-Lambert is distance-based (physics doesn't change with binning convention).
+      intensities[bin] += get_scattering_value(pos, material) * intensity *
+                          get_intensity_at_distance(distance, material->attenuation_);
+      organ_ids_out[bin] = organ_id;
+      material_ids_out[bin] = material_id;
+    }
   }
 }
 
