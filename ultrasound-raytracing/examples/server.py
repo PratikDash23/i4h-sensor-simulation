@@ -123,7 +123,7 @@ organ_palette = _build_organ_palette(len(organ_names))
 # Cached drawing context just to call textbbox without allocating a new
 # ImageDraw per measurement.
 try:
-    _LEGEND_FONT = ImageFont.truetype("/workspace/i4h-sim/calibrib.ttf", 22)
+    _LEGEND_FONT = ImageFont.truetype("/workspace/i4h-sim/fonts/calibrib.ttf", 22)
 except (IOError, OSError):
     try:
         import matplotlib as _mpl_for_legend
