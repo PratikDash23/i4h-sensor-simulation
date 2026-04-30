@@ -212,6 +212,10 @@
                             <input type="checkbox" id="showOrganOverlay" name="showOrganOverlay" checked>
                             <span>Organ Overlay</span>
                         </label>
+                        <label style="display: flex; align-items: center; gap: 8px; margin: 8px 0;" title="Alpha-blend the per-pixel material id (water / blood / fat / liver / muscle / bone / air / thyroid / cartilage) instead of the organ id. Useful for picking which material's parameters to tune to change a region.">
+                            <input type="checkbox" id="showMaterialOverlay" name="showMaterialOverlay">
+                            <span>Material Overlay</span>
+                        </label>
                         <div style="margin-top: 8px;">
                             <label for="overlayAlpha" style="display: block; margin-bottom: 4px;">Overlay Opacity:</label>
                             <div style="display: flex; align-items: center; gap: 8px;">
@@ -481,6 +485,7 @@
                     document.getElementById('contactEpsilon').value = params.contact_epsilon;
                     document.getElementById('tFar').value = params.t_far;
                     document.getElementById('showOrganOverlay').checked = params.show_organ_overlay;
+                    document.getElementById('showMaterialOverlay').checked = params.show_material_overlay;
                     document.getElementById('overlayAlpha').value = params.overlay_alpha;
                     document.getElementById('overlayAlphaValue').textContent = parseFloat(params.overlay_alpha).toFixed(2);
                     document.getElementById('minDb').value = params.min_db;
@@ -662,7 +667,19 @@
             });
 
             document.getElementById('showOrganOverlay').addEventListener('change', (e) => {
+                if (e.target.checked) {
+                    document.getElementById('showMaterialOverlay').checked = false;
+                    updateSimParams('show_material_overlay', false);
+                }
                 updateSimParams('show_organ_overlay', e.target.checked);
+            });
+
+            document.getElementById('showMaterialOverlay').addEventListener('change', (e) => {
+                if (e.target.checked) {
+                    document.getElementById('showOrganOverlay').checked = false;
+                    updateSimParams('show_organ_overlay', false);
+                }
+                updateSimParams('show_material_overlay', e.target.checked);
             });
 
             document.getElementById('overlayAlpha').addEventListener('input', (e) => {

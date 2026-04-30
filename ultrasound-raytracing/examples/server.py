@@ -120,6 +120,25 @@ def _build_organ_palette(n):
 
 organ_palette = _build_organ_palette(len(organ_names))
 
+# Material palette — fixed (not generated). The materials list is defined in
+# i4h-sensor-simulation/.../csrc/core/material.cpp; this list MUST mirror that
+# order because the sim returns material_ids as the index into that table.
+# The first 6 are the NVIDIA defaults; the last 3 are appended by
+# simulated_US/patches/material_cpp_additions.txt (used by the thyroid scene).
+MATERIAL_NAMES = ["water", "blood", "fat", "liver", "muscle",
+                  "bone", "air", "thyroid", "cartilage"]
+MATERIAL_PALETTE = np.array([
+    [135, 206, 235],   # water     - sky blue
+    [220,  20,  60],   # blood     - crimson
+    [255, 215,   0],   # fat       - gold
+    [139,  69,  19],   # liver     - saddle brown
+    [250, 128, 114],   # muscle    - salmon pink
+    [245, 222, 179],   # bone      - wheat
+    [ 30,  30,  60],   # air       - midnight blue
+    [218, 112, 214],   # thyroid   - orchid
+    [192, 192, 192],   # cartilage - silver
+], dtype=np.uint8)
+
 # Cached drawing context just to call textbbox without allocating a new
 # ImageDraw per measurement.
 try:
@@ -420,6 +439,10 @@ sim_params.assumed_sos = 1540.0  # m/s — the scanner's TOF→displayed-depth a
 # without the organ color overlay or legend. Not part of the C++ SimParams since
 # it only affects PNG composition in this server.
 show_organ_overlay = True
+# When True, the alpha overlay shows per-pixel MATERIAL ids instead of organ
+# ids. Mutually exclusive with show_organ_overlay in the UI; if both ever end
+# up True at runtime, material wins (more specific tunable).
+show_material_overlay = False
 
 
 @app.route("/")
@@ -462,6 +485,7 @@ def get_sim_params():
         "contact_epsilon": sim_params.contact_epsilon,
         "t_far": sim_params.t_far,
         "show_organ_overlay": show_organ_overlay,
+        "show_material_overlay": show_material_overlay,
         "overlay_alpha": overlay_alpha,
         "min_db": min_db,
         "max_db": max_db,
@@ -473,7 +497,7 @@ def get_sim_params():
 @app.route("/set_sim_params", methods=["POST"])
 def set_sim_params():
     """Update simulation parameters"""
-    global show_organ_overlay, overlay_alpha, min_db, max_db
+    global show_organ_overlay, show_material_overlay, overlay_alpha, min_db, max_db
     try:
         params = request.json
 
@@ -494,6 +518,9 @@ def set_sim_params():
 
         if "show_organ_overlay" in params:
             show_organ_overlay = bool(params["show_organ_overlay"])
+
+        if "show_material_overlay" in params:
+            show_material_overlay = bool(params["show_material_overlay"])
 
         if "overlay_alpha" in params:
             overlay_alpha = float(np.clip(params["overlay_alpha"], 0.0, 1.0))
@@ -525,6 +552,7 @@ def set_sim_params():
                 "contact_epsilon": sim_params.contact_epsilon,
         "t_far": sim_params.t_far,
                 "show_organ_overlay": show_organ_overlay,
+                "show_material_overlay": show_material_overlay,
                 "overlay_alpha": overlay_alpha,
                 "min_db": min_db,
                 "max_db": max_db,
@@ -579,10 +607,8 @@ def simulate():
     probes[active_probe].set_pose(new_pose)
 
     # The simulator returns three (H, W) arrays: the float32 dB-clipped B-mode
-    # image and two uint32 categorical id maps (organ + material). We use the
-    # organ ids for the visible overlay; material ids are kept unused here but
-    # available for downstream consumers.
-    b_mode_image, organ_ids, _material_ids = simulator.simulate(
+    # image and two uint32 categorical id maps (organ + material).
+    b_mode_image, organ_ids, material_ids = simulator.simulate(
         probes[active_probe], sim_params)
 
     # Apply dB-window normalization. Bounds come from the live sliders so the
@@ -590,13 +616,24 @@ def simulate():
     # (more contrast) without restarting the server.
     normalized_image = np.clip((b_mode_image - min_db) / (max_db - min_db), 0, 1)
 
-    # Convert to 8-bit grayscale. With the overlay enabled, alpha-blend the
-    # organ map on top and append the legend; otherwise return plain grayscale.
+    # Convert to 8-bit grayscale. Alpha-blend the chosen overlay (material has
+    # priority over organ if both ever ended up True simultaneously) and
+    # append the matching legend; if neither overlay is enabled, return plain
+    # grayscale.
     img_uint8 = (normalized_image * 255).astype(np.uint8)
     cone_h_px = img_uint8.shape[0]
-    if show_organ_overlay:
-        overlay_rgb = _compose_overlay(img_uint8, organ_ids, organ_palette, alpha=overlay_alpha)
-        composite = _attach_legend(overlay_rgb, organ_names, organ_palette, layout=layout)
+    if show_material_overlay:
+        # Material palette is keyed by id — same shape contract as organ
+        # palette (N, 3) so _compose_overlay reuses unchanged.
+        overlay_rgb = _compose_overlay(img_uint8, material_ids, MATERIAL_PALETTE,
+                                       alpha=overlay_alpha)
+        composite = _attach_legend(overlay_rgb, MATERIAL_NAMES, MATERIAL_PALETTE,
+                                   layout=layout)
+    elif show_organ_overlay:
+        overlay_rgb = _compose_overlay(img_uint8, organ_ids, organ_palette,
+                                       alpha=overlay_alpha)
+        composite = _attach_legend(overlay_rgb, organ_names, organ_palette,
+                                   layout=layout)
     else:
         gray_rgb = np.repeat(img_uint8[:, :, None], 3, axis=2)
         composite = Image.fromarray(gray_rgb, mode="RGB")
