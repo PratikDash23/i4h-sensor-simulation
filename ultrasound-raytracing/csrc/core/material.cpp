@@ -42,7 +42,7 @@ Materials::Materials() {
                 {"blood", Material(1.61f, 0.18f, 1570.f, 0.1f, 0.1f, 0.1f)},
                 {"fat", Material(1.38f, 0.63f, 1450.f, 1.f, 0.f, 1.f, 0.f)},
                 {"liver", Material(1.65f, 0.7f, 1550.f, 0.7f, 0.f, 0.3f, 1e-5f)},
-                {"muscle", Material(1.70f, 1.09f, 1580.f, 0.5f, 0.8f, 0.4f)},
+                {"muscle", Material(1.70f, 0.70f, 1580.f, 0.5f, 0.8f, 0.4f)},
                 {"bone", Material(7.80f, 5.f, 4080.f, 0.8f, 0.9f, 0.5f)}};
 
   // Upload materials to device
